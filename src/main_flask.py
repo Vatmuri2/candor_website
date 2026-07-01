@@ -254,6 +254,21 @@ def archive_session_wrapper(wrapper: Optional[SessionWrapper]) -> None:
     except Exception as e:
         app.logger.warning(f"Drive archive failed for {wrapper.user_id}: {e}")
 
+def write_candor_transcript(dir_user_id: str, candor_bot: CandorInterviewer) -> None:
+    """Write a candor session's transcript as JSON under LOGS_DIR/<dir_user_id>/
+    so it gets picked up by the same Drive archive as the SparkMe session."""
+    out_dir = os.path.join(os.getenv('LOGS_DIR', 'logs'), dir_user_id)
+    os.makedirs(out_dir, exist_ok=True)
+    payload = {
+        'bot': 'candor',
+        'model': getattr(candor_bot, 'model', None),
+        'topic_desc': getattr(candor_bot, 'topic_desc', None),
+        'stats': getattr(candor_bot, 'stats', {}),
+        'transcript': getattr(candor_bot, 'transcript', []),
+    }
+    with open(os.path.join(out_dir, 'candor_transcript.json'), 'w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2)
+
 # =============================================================================
 # PAGE ROUTES - PUBLIC (no login; the user just picks a conversation type)
 # =============================================================================
@@ -875,6 +890,49 @@ def candor_end():
     token = data.get('candor_token')
     candor_sessions.pop(token, None)
     return jsonify({'success': True})
+
+
+@app.route('/api/compare/end', methods=['POST'])
+def compare_end():
+    """End a side-by-side comparison and archive BOTH transcripts to Drive.
+
+    candor's transcript is written into the SparkMe user's log folder, then the
+    SparkMe session is ended and archived — so both land in one Drive zip.
+    """
+    data = request.get_json(silent=True) or {}
+    spark_token = data.get('session_token')
+    candor_token = data.get('candor_token')
+
+    wrapper = get_session_wrapper(spark_token)
+    candor_bot = candor_sessions.get(candor_token)
+
+    if wrapper:
+        # Fold candor's transcript in beside SparkMe's logs before archiving.
+        if candor_bot:
+            try:
+                write_candor_transcript(wrapper.user_id, candor_bot)
+            except Exception as e:
+                app.logger.warning(f"could not write candor transcript: {e}")
+        try:
+            wrapper.interview_session.end_session()
+        except Exception as e:
+            app.logger.warning(f"ending SparkMe session failed: {e}")
+        archive_session_wrapper(wrapper)  # zips logs (now incl. candor) -> Drive
+    elif candor_bot:
+        # No SparkMe session (edge case) — archive candor on its own.
+        pseudo_id = f"candor_{candor_token[:12]}"
+        try:
+            write_candor_transcript(pseudo_id, candor_bot)
+            drive_export.archive_session(user_id=pseudo_id, session_id=0)
+        except Exception as e:
+            app.logger.warning(f"candor-only archive failed: {e}")
+
+    candor_sessions.pop(candor_token, None)
+    return jsonify({
+        'success': True,
+        'archived': bool(wrapper or candor_bot),
+        'drive_configured': drive_export.is_configured(),
+    })
 
 
 # =============================================================================

@@ -92,6 +92,7 @@
     <header class="bar">
         <b>Comparing interviewers</b><span class="topic" id="topic-label"></span>
         <span class="spacer"></span>
+        <button id="end-save" style="background:#ff9800;color:#fff;border:none;border-radius:6px;padding:9px 16px;font-size:14px;font-weight:600;cursor:pointer;" disabled>🛑 End &amp; save</button>
         <a href="/compare">↺ New comparison</a>
     </header>
     <div class="panes">
@@ -171,6 +172,7 @@
                 : '· ' + document.querySelector('.card.selected .label').textContent;
             document.getElementById('answer').disabled = false;
             document.getElementById('send').disabled = false;
+            document.getElementById('end-save').disabled = false;
             document.getElementById('answer').focus();
 
             // SparkMe's first question arrives via polling.
@@ -265,6 +267,26 @@
     sendBtn.addEventListener('click', sendAnswer);
     answerEl.addEventListener('keydown', e => {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAnswer(); }
+    });
+
+    // ===================== end & save =====================
+    const endBtn = document.getElementById('end-save');
+    endBtn.addEventListener('click', async () => {
+        if (!confirm('End the comparison and save both transcripts?')) return;
+        if (sparkPoll) { clearInterval(sparkPoll); sparkPoll = null; }
+        answerEl.disabled = true; sendBtn.disabled = true; endBtn.disabled = true;
+        setStatus('status-a', 'Saving…'); setStatus('status-b', 'Saving…');
+        try {
+            const r = await fetch('/api/compare/end', {method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({session_token: sparkToken, candor_token: candorToken})});
+            const d = await r.json();
+            const note = d.success ? (d.drive_configured ? 'Saved to Drive ✓' : 'Saved on server ✓') : 'Save failed';
+            setStatus('status-a', note); setStatus('status-b', note);
+            answerEl.placeholder = 'Comparison ended.';
+        } catch (e) {
+            setStatus('status-a', 'Save failed'); setStatus('status-b', 'Save failed');
+            endBtn.disabled = false;
+        }
     });
     </script>
 </body>
