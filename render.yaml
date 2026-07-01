@@ -9,17 +9,16 @@ services:
     name: candor-website
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter            # "starter" supports a persistent disk. Use "free" to skip the disk.
+    plan: free               # free instance, no payment info required
     healthCheckPath: /health
     autoDeploy: true
 
-    # Persistent disk for live working files (FAISS memory bank, session logs,
-    # agendas). Mounted at /var/data so it does NOT mask the topic config files
-    # baked into the image at /app/data/configs. Survives restarts/redeploys.
-    disk:
-      name: candor-data
-      mountPath: /var/data
-      sizeGB: 1
+    # NOTE: The free plan has NO persistent disk. Live working files (FAISS
+    # memory bank, session logs) go to the container's ephemeral filesystem at
+    # /var/data and are wiped on redeploy / sleep. To keep durable copies of
+    # finished interviews, configure the Google Drive export (see DEPLOY.md §3).
+    # To get a persistent disk later, upgrade to plan: starter and add back a
+    # `disk:` block mounted at /var/data.
 
     envVars:
       # ---- Storage locations (logs/data on the disk; configs from the image) ----
