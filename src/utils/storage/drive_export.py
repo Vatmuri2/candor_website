@@ -29,17 +29,50 @@ logger = logging.getLogger(__name__)
 _SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
+def _has_oauth() -> bool:
+    return bool(
+        os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+        and os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+        and os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN")
+    )
+
+
+def _has_service_account() -> bool:
+    return bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+
+
 def is_configured() -> bool:
     """True if the env vars needed for Drive upload are present."""
-    return bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") and os.getenv("GDRIVE_FOLDER_ID"))
+    return bool(os.getenv("GDRIVE_FOLDER_ID")) and (_has_oauth() or _has_service_account())
 
 
-def _load_credentials():
+def _load_oauth_credentials():
+    """Build user OAuth credentials from a stored refresh token. Returns None on failure.
+
+    Files uploaded with these are owned by the account that authorized them
+    (i.e. real storage quota), which is why this is preferred over a service
+    account for uploading into a personal / edu My Drive folder.
+    """
+    try:
+        from google.oauth2.credentials import Credentials  # lazy import
+        return Credentials(
+            token=None,
+            refresh_token=os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN"),
+            client_id=os.getenv("GOOGLE_OAUTH_CLIENT_ID"),
+            client_secret=os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=_SCOPES,
+        )
+    except Exception as e:
+        logger.warning(f"Could not build Drive OAuth credentials: {e}")
+        return None
+
+
+def _load_service_account_credentials():
     """Build service-account credentials from env. Returns None on any problem."""
     raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     if not raw:
         return None
-
     try:
         # Accept either the raw JSON string or a path to a JSON file.
         if raw.startswith("{"):
@@ -54,8 +87,17 @@ def _load_credentials():
         from google.oauth2 import service_account  # lazy import
         return service_account.Credentials.from_service_account_info(info, scopes=_SCOPES)
     except Exception as e:
-        logger.warning(f"Could not build Drive credentials: {e}")
+        logger.warning(f"Could not build Drive service-account credentials: {e}")
         return None
+
+
+def _load_credentials():
+    """Prefer OAuth (user-owned files) then fall back to a service account."""
+    if _has_oauth():
+        creds = _load_oauth_credentials()
+        if creds is not None:
+            return creds
+    return _load_service_account_credentials()
 
 
 def _zip_dir(src_dir: Path) -> Optional[io.BytesIO]:

@@ -128,7 +128,9 @@ flask-login
 google-cloud-storage
 # Web server for container deploys (Render / Cloud Run)
 gunicorn==23.0.0
-# Optional: Google Drive archival of finished interviews (service account)
+# Optional: Google Drive archival of finished interviews
 google-api-python-client==2.149.0
 google-auth-httplib2==0.2.0
 httplib2==0.22.0
+# Only needed to run scripts/get_oauth_token.py locally (not used by the server)
+google-auth-oauthlib==1.2.1

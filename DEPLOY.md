@@ -52,21 +52,40 @@ replaces its history).
 
 ## 3. (Optional) Archive finished interviews to Google Drive
 
-Drive uploads use a **service account**, not a plain API key.
+Each finished interview is uploaded as a timestamped `.zip`. Two auth options —
+**OAuth is recommended** for a personal / edu account, because uploaded files are
+owned by *your* account and use its real storage quota. (A service account has
+**no storage quota** and can only upload into a *Shared Drive*, so it fails with
+`storageQuotaExceeded` when pointed at a normal My Drive folder.)
 
-1. In Google Cloud Console → **APIs & Services** → enable the **Google Drive API**.
-2. **Credentials** → **Create credentials** → **Service account**. After creating
-   it, open the account → **Keys** → **Add key** → **JSON**, and download it.
-3. Copy the account's `client_email` from that JSON.
-4. In Google Drive, create a folder, **Share** it with that `client_email` as
-   **Editor**. The folder id is the last part of its URL:
-   `drive.google.com/drive/folders/`**`<GDRIVE_FOLDER_ID>`**.
-5. In Render, set env vars:
-   - `GOOGLE_SERVICE_ACCOUNT_JSON` = the **entire** JSON key file contents.
-   - `GDRIVE_FOLDER_ID` = the folder id.
-6. Redeploy. When an interview ends, a `.zip` of its transcript/logs is uploaded
-   to that folder. If the vars are unset or wrong, upload is skipped and data
-   still stays on the disk — it never breaks an interview.
+Common setup:
+- In Google Cloud Console → **APIs & Services** → enable the **Google Drive API**.
+- In Drive, create a folder; its id is the last part of the URL:
+  `drive.google.com/drive/folders/`**`<GDRIVE_FOLDER_ID>`**.
+
+### Option A — OAuth (recommended)
+1. **APIs & Services → Credentials → Create credentials → OAuth client ID.**
+   If prompted, configure the consent screen (**External**, add your email as a
+   **Test user**). Application type: **Desktop app**. Download the client secret JSON.
+2. On your laptop, run the one-time helper (opens a browser — log in with the
+   account whose Drive should own the files):
+   ```bash
+   python scripts/get_oauth_token.py /path/to/client_secret.json
+   ```
+3. It prints three values. In Render set them plus the folder id:
+   - `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`
+   - `GDRIVE_FOLDER_ID`
+
+### Option B — Service account (only with a Shared Drive)
+1. **Credentials → Create credentials → Service account**; download its JSON key.
+2. Create a **Shared Drive** (Team Drive), add the account's `client_email` as
+   **Content manager**, and use a folder inside it for `GDRIVE_FOLDER_ID`.
+3. In Render set `GOOGLE_SERVICE_ACCOUNT_JSON` (entire JSON) and `GDRIVE_FOLDER_ID`.
+
+Either way: if the vars are unset or wrong, upload is skipped and data still
+stays on disk — it never breaks an interview. Verify a setup with
+`python scripts/test_drive_upload.py <key.json> <folder_id>` (service account) or
+by finishing a test interview.
 
 ---
 
