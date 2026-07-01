@@ -3,6 +3,12 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Runtime interview data / logs (never commit user data)
+/logs/
+/data/logs/
+/data/data/
+data/users.json
+
 # C extensions
 *.so
 

@@ -191,7 +191,7 @@
         let isSessionCompleted = false;
         let pollingInterval = null;  // NEW: Track polling interval
         let isInitializing = false;  // NEW: Prevent duplicate initialization
-        const MIN_SESSION_DURATION_MS = 45 * 60 * 1000;
+        const MIN_SESSION_DURATION_MS = 0;  // allow ending the session at any time
 
         // ===================================================================
         // UTILITY FUNCTIONS
@@ -220,6 +220,18 @@
                 e.preventDefault();
                 return false;
             };
+        }
+
+        function showStartOver() {
+            if (document.getElementById('start-over-btn')) return;
+            const panel = document.querySelector('.control-panel');
+            if (!panel) return;
+            const btn = document.createElement('button');
+            btn.id = 'start-over-btn';
+            btn.textContent = '＋ New conversation';
+            btn.style.cssText = 'background:#4CAF50;color:#fff;padding:12px 24px;border:none;border-radius:4px;cursor:pointer;font-size:16px;';
+            btn.onclick = () => { sessionStorage.removeItem('candor_session_token'); window.location.href = '/'; };
+            panel.appendChild(btn);
         }
 
         function appendMessage(role, text, messageId) {
@@ -302,52 +314,33 @@
         // ===================================================================
         // SESSION INITIALIZATION - FIXED!
         // ===================================================================
-        async function initializeSession() {
-            // Prevent duplicate initialization
+        function initializeSession() {
+            // The session was created on the landing page (/). We just pick up
+            // the token here. If there isn't one, send the user back to choose.
             if (isInitializing || sessionToken) {
-                console.log('Session already initializing or exists');
+                return;
+            }
+            isInitializing = true;
+
+            const storedToken = sessionStorage.getItem('candor_session_token');
+            if (!storedToken) {
+                updateStatus('No conversation selected — redirecting…');
+                window.location.href = '/';
                 return;
             }
 
-            isInitializing = true;
-            
-            try {
-                updateStatus('Initializing session...');
-                
-                const response = await fetch('/api/start-session', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    sessionToken = data.session_token;
-                    sessionStartTime = Date.now();
-                    
-                    console.log('Session initialized:', sessionToken);
-                    updateStatus('Session started. Ready to chat!');
-                    
-                    // Start polling ONCE
-                    if (!pollingInterval) {
-                        pollingInterval = setInterval(pollForMessages, 1500);
-                    }
-                    
-                    // Start button update timer
-                    setInterval(updateEndSessionButton, 1000);
-                    
-                    // Do initial poll
-                    pollForMessages();
-                } else {
-                    updateStatus('Failed to start session: ' + (data.error || 'Unknown error'));
-                    console.error('Failed to start session', data);
-                }
-            } catch (e) {
-                updateStatus('Error starting session');
-                console.error('Error starting session', e);
-            } finally {
-                isInitializing = false;
+            sessionToken = storedToken;
+            sessionStartTime = Date.now();
+            updateStatus('Session started. Ready to chat!');
+
+            // Start polling for interviewer messages.
+            if (!pollingInterval) {
+                pollingInterval = setInterval(pollForMessages, 1500);
             }
+            setInterval(updateEndSessionButton, 1000);
+            pollForMessages();
+
+            isInitializing = false;
         }
 
         // ===================================================================
@@ -365,6 +358,9 @@
                     sessionToken = null;
                     clearInterval(pollingInterval);
                     pollingInterval = null;
+                    sessionStorage.removeItem('candor_session_token');
+                    updateStatus('Session expired — redirecting…');
+                    setTimeout(() => { window.location.href = '/'; }, 1500);
                     return;
                 }
 
@@ -388,7 +384,9 @@
                     isSessionCompleted = true;
                     updateEndSessionButton();
                     disableChatInputs();
-                    
+                    sessionStorage.removeItem('candor_session_token');
+                    showStartOver();
+
                     // Stop polling
                     if (pollingInterval) {
                         clearInterval(pollingInterval);
@@ -617,7 +615,9 @@
                     isSessionCompleted = true;
                     updateEndSessionButton();
                     disableChatInputs();
-                    
+                    sessionStorage.removeItem('candor_session_token');
+                    showStartOver();
+
                     if (pollingInterval) {
                         clearInterval(pollingInterval);
                         pollingInterval = null;

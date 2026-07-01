@@ -1,0 +1,38 @@
+[
+    {
+        "topic": "Roots & Upbringing",
+        "subtopics": [
+            "Where they grew up and what it was like",
+            "Family and the people who raised or influenced them",
+            "Early memories that stand out",
+            "Values or traditions that shaped them"
+        ]
+    },
+    {
+        "topic": "Formative Experiences",
+        "subtopics": [
+            "Moments that changed how they see the world",
+            "Challenges they have overcome",
+            "Places they have lived or traveled that mattered",
+            "Friendships or relationships that shaped them"
+        ]
+    },
+    {
+        "topic": "Passions & Everyday Life",
+        "subtopics": [
+            "Hobbies, interests, and how they spend free time",
+            "What a typical day or week looks like",
+            "What brings them joy or a sense of purpose",
+            "Communities or groups they feel part of"
+        ]
+    },
+    {
+        "topic": "Reflections & Outlook",
+        "subtopics": [
+            "Lessons they have learned about life",
+            "What they are most grateful for",
+            "Hopes and plans for the future",
+            "How they would like to be remembered"
+        ]
+    }
+]

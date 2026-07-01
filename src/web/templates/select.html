@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Candor — Choose a Conversation</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px;
+        }
+        .container {
+            width: 100%; max-width: 760px; background: #fff; border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3); padding: 40px;
+        }
+        h1 { color: #2d2d3a; font-size: 30px; margin-bottom: 8px; }
+        .subtitle { color: #666; margin-bottom: 28px; font-size: 16px; line-height: 1.5; }
+        .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        @media (max-width: 560px) { .cards { grid-template-columns: 1fr; } }
+        .card {
+            border: 2px solid #e6e6ef; border-radius: 12px; padding: 20px; cursor: pointer;
+            transition: border-color .15s, transform .15s, box-shadow .15s; background: #fafafe;
+        }
+        .card:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(102,126,234,.18); }
+        .card.selected { border-color: #667eea; background: #f0f3ff; }
+        .card .emoji { font-size: 28px; }
+        .card .label { font-weight: 700; color: #2d2d3a; margin: 8px 0 6px; font-size: 17px; }
+        .card .blurb { color: #666; font-size: 14px; line-height: 1.45; }
+        #custom-wrap { margin-top: 18px; display: none; }
+        #custom-wrap.show { display: block; }
+        #custom-input {
+            width: 100%; padding: 12px 14px; border: 2px solid #e6e6ef; border-radius: 10px;
+            font-size: 15px; font-family: inherit; resize: vertical; min-height: 70px;
+        }
+        #custom-input:focus { outline: none; border-color: #667eea; }
+        .actions { margin-top: 26px; display: flex; align-items: center; gap: 14px; }
+        .start-btn {
+            padding: 14px 34px; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff;
+            border: none; border-radius: 8px; font-size: 17px; font-weight: 700; cursor: pointer;
+            transition: transform .15s, box-shadow .15s; box-shadow: 0 4px 15px rgba(102,126,234,.4);
+        }
+        .start-btn:hover:not(:disabled) { transform: translateY(-2px); }
+        .start-btn:disabled { opacity: .5; cursor: not-allowed; }
+        #status { color: #888; font-size: 14px; }
+        .privacy { margin-top: 22px; font-size: 12.5px; color: #999; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ Start a conversation</h1>
+        <p class="subtitle">Pick what you'd like to talk about. An AI interviewer will guide the conversation — just answer in your own words.</p>
+
+        <div class="cards" id="cards">
+            {% for t in conversation_types %}
+            <div class="card" data-key="{{ t.key }}" tabindex="0">
+                <div class="emoji">{{ t.emoji }}</div>
+                <div class="label">{{ t.label }}</div>
+                <div class="blurb">{{ t.blurb }}</div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div id="custom-wrap">
+            <textarea id="custom-input" placeholder="What would you like to be interviewed about? (e.g. 'my experience starting a small business')"></textarea>
+        </div>
+
+        <div class="actions">
+            <button id="start-btn" class="start-btn" disabled>Begin interview →</button>
+            <span id="status"></span>
+        </div>
+
+        <p class="privacy">You don't need to share personally identifying information. Conversations may be recorded and stored for research and quality purposes.</p>
+    </div>
+
+    <script>
+        let selectedKey = null;
+
+        const cards = document.querySelectorAll('.card');
+        const customWrap = document.getElementById('custom-wrap');
+        const customInput = document.getElementById('custom-input');
+        const startBtn = document.getElementById('start-btn');
+        const statusEl = document.getElementById('status');
+
+        function refreshButton() {
+            const needsText = selectedKey === 'custom';
+            const ok = selectedKey && (!needsText || customInput.value.trim().length > 0);
+            startBtn.disabled = !ok;
+        }
+
+        cards.forEach(card => {
+            const choose = () => {
+                cards.forEach(c => c.classList.remove('selected'));
+                card.classList.add('selected');
+                selectedKey = card.dataset.key;
+                customWrap.classList.toggle('show', selectedKey === 'custom');
+                refreshButton();
+            };
+            card.addEventListener('click', choose);
+            card.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(); } });
+        });
+
+        customInput.addEventListener('input', refreshButton);
+
+        startBtn.addEventListener('click', async () => {
+            if (!selectedKey) return;
+            startBtn.disabled = true;
+            statusEl.textContent = 'Starting your session…';
+
+            const payload = { conversation_type: selectedKey };
+            if (selectedKey === 'custom') payload.custom_description = customInput.value.trim();
+
+            // Reuse an anonymous id across sessions in this browser, if present.
+            const existingUserId = localStorage.getItem('candor_user_id');
+            if (existingUserId) payload.user_id = existingUserId;
+
+            try {
+                const res = await fetch('/api/start-session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    localStorage.setItem('candor_user_id', data.user_id);
+                    sessionStorage.setItem('candor_session_token', data.session_token);
+                    sessionStorage.setItem('candor_conversation_type', data.conversation_type || selectedKey);
+                    window.location.href = '/chat';
+                } else {
+                    statusEl.textContent = 'Could not start: ' + (data.error || 'unknown error');
+                    startBtn.disabled = false;
+                }
+            } catch (e) {
+                console.error(e);
+                statusEl.textContent = 'Network error — please try again.';
+                startBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

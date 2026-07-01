@@ -1,0 +1,33 @@
+[
+    {
+        "topic": "Framing & Context",
+        "subtopics": [
+            "The person's background relevant to this topic",
+            "Why this topic matters to them",
+            "Their current relationship to or involvement with the topic"
+        ]
+    },
+    {
+        "topic": "Experiences & Specifics",
+        "subtopics": [
+            "Concrete stories, examples, or moments related to the topic",
+            "Details of how things actually unfolded",
+            "Challenges, surprises, or turning points"
+        ]
+    },
+    {
+        "topic": "Perspectives & Meaning",
+        "subtopics": [
+            "What they think and feel about the topic",
+            "How their views have changed over time",
+            "What they have learned or taken away"
+        ]
+    },
+    {
+        "topic": "Looking Ahead",
+        "subtopics": [
+            "Where they see this going for them",
+            "Hopes, plans, or open questions they still have"
+        ]
+    }
+]

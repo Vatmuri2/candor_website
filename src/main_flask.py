@@ -3,9 +3,8 @@ Flask Web Application for Interview Session
 Supports both text and voice input/output with authentication
 """
 
-from flask import Flask, request, jsonify, render_template, Response, redirect, url_for, flash
+from flask import Flask, request, jsonify, render_template, Response, redirect, url_for
 from flask_cors import CORS
-from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 import traceback
 import asyncio
 import threading
@@ -15,7 +14,6 @@ import argparse
 import time
 import logging
 import secrets
-import hashlib
 import json
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -27,6 +25,7 @@ from src.utils.speech.text_to_speech import TextToSpeechBase, create_tts_engine
 from src.utils.speech.audio_player import AudioPlayerBase, create_audio_player
 from src.utils.speech.speech_to_text import create_stt_engine
 from src.interview_session.interview_session import InterviewSession
+from src.utils.storage import drive_export
 
 load_dotenv(override=True)
 
@@ -68,47 +67,60 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY', secrets.token_hex(32))
 CORS(app)
 
 # =============================================================================
-# AUTHENTICATION SETUP
+# CONVERSATION TYPES
 # =============================================================================
+# Each preset maps a user-facing choice to an interview description + a topic
+# plan (a JSON file in data/configs). "custom" lets the visitor supply their
+# own topic; it reuses a broad open-ended plan and swaps in their description.
 
-login_manager = LoginManager()
-login_manager.init_app(app)
-login_manager.login_view = 'login'
-login_manager.login_message = 'Please log in to access the interview.'
+def _config_path(filename: str) -> str:
+    """Resolve a config file, preferring the mounted-disk copy if present."""
+    disk_path = os.path.join(os.path.dirname(os.getenv('DATA_DIR', 'data')), 'configs', filename)
+    if os.path.exists(disk_path):
+        return disk_path
+    return os.path.join('data', 'configs', filename)
 
-USERS_FILE = os.path.join(os.getenv('DATA_DIR', 'data'), 'users.json')
+CONVERSATION_TYPES = {
+    "ai_workforce": {
+        "label": "AI in the Workforce",
+        "emoji": "🤖",
+        "blurb": "A research interview about how you use AI tools in your day-to-day work.",
+        "description": "Understanding the impact of AI in the workforce",
+        "plan_file": "topics.json",
+    },
+    "career_story": {
+        "label": "Career & Work Story",
+        "emoji": "💼",
+        "blurb": "Talk through your career journey, motivations, and where you're headed.",
+        "description": "Exploring your career journey, work, and professional growth",
+        "plan_file": "topics_career.json",
+    },
+    "life_background": {
+        "label": "Life & Background",
+        "emoji": "🌱",
+        "blurb": "Share your story — roots, formative experiences, and reflections.",
+        "description": "Exploring your life story, background, and personal experiences",
+        "plan_file": "topics_life.json",
+    },
+    "custom": {
+        "label": "Custom Topic",
+        "emoji": "✨",
+        "blurb": "Tell us what you'd like to be interviewed about and we'll take it from there.",
+        "description": None,          # filled in from the user's text at start
+        "plan_file": "topics_general.json",
+    },
+}
 
-class User(UserMixin):
-    def __init__(self, user_id, username):
-        self.id = user_id
-        self.username = username
+DEFAULT_CONVERSATION_TYPE = "ai_workforce"
 
-def load_users():
-    """Load users from JSON file"""
-    if os.path.exists(USERS_FILE):
-        try:
-            with open(USERS_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_users(users):
-    """Save users to JSON file"""
-    os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users, f, indent=2)
-
-def hash_password(password):
-    """Hash password using SHA-256"""
-    return hashlib.sha256(password.encode()).hexdigest()
-
-@login_manager.user_loader
-def load_user(user_id):
-    users = load_users()
-    if user_id in users:
-        return User(user_id, users[user_id]['username'])
-    return None
+def resolve_conversation(conversation_type: Optional[str], custom_description: Optional[str] = None):
+    """Return (interview_description, interview_plan_path) for a chosen type."""
+    preset = CONVERSATION_TYPES.get(conversation_type or DEFAULT_CONVERSATION_TYPE,
+                                    CONVERSATION_TYPES[DEFAULT_CONVERSATION_TYPE])
+    description = preset["description"]
+    if description is None:  # custom
+        description = (custom_description or "").strip() or "A topic of the participant's choosing"
+    return description, _config_path(preset["plan_file"])
 
 # =============================================================================
 # LOGGING SETUP
@@ -152,20 +164,27 @@ def run_async_task(coro):
 
 class SessionWrapper:
     def __init__(self, session_token: str, interview_session: InterviewSession,
-                 user_id: str):
+                 user_id: str, conversation_type: Optional[str] = None):
         self.session_token = session_token
         self.interview_session = interview_session
         self.user_id = user_id
+        self.conversation_type = conversation_type
         self.created_at = time.time()
+        self.archived = False  # guard so we only export to Drive once
 
 active_sessions: Dict[str, SessionWrapper] = {}
 last_messages_by_session: Dict[str, Dict[str, str]] = {}
 session_audio_cache: Dict[str, Dict[str, object]] = {}
 
-def create_interview_session(user_id: str) -> tuple[InterviewSession, str]:
-    """Create interview session with authenticated user_id"""
+def create_interview_session(user_id: str, conversation_type: Optional[str] = None,
+                             custom_description: Optional[str] = None) -> tuple[InterviewSession, str]:
+    """Create an interview session for an anonymous web user + chosen topic."""
     session_token = str(uuid.uuid4())
-    
+
+    interview_description, interview_plan_path = resolve_conversation(
+        conversation_type, custom_description
+    )
+
     interview_session = InterviewSession(
         interaction_mode='api',
         user_config={
@@ -175,11 +194,8 @@ def create_interview_session(user_id: str) -> tuple[InterviewSession, str]:
         },
         interview_config={
             "enable_voice": False,
-            "interview_description": os.getenv(
-                'INTERVIEW_DESCRIPTION', 
-                "Understanding the impact of AI in the workforce"
-            ),
-            "interview_plan_path": os.getenv('INTERVIEW_PLAN_PATH'),
+            "interview_description": interview_description,
+            "interview_plan_path": interview_plan_path,
             "interview_evaluation": os.getenv('COMPLETION_METRIC'),
             "additional_context_path": config.additional_context_path,
             "initial_user_portrait_path": os.getenv('USER_PORTRAIT_PATH'),
@@ -191,6 +207,7 @@ def create_interview_session(user_id: str) -> tuple[InterviewSession, str]:
         session_token=session_token,
         interview_session=interview_session,
         user_id=user_id,
+        conversation_type=conversation_type,
     )
     active_sessions[session_token] = wrapper
     
@@ -214,162 +231,95 @@ def get_session(session_token: str) -> Optional[InterviewSession]:
 def get_session_wrapper(session_token: str) -> Optional[SessionWrapper]:
     return active_sessions.get(session_token)
 
-# =============================================================================
-# AUTHENTICATION ROUTES (NO @login_required)
-# =============================================================================
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    """Login page"""
-    if current_user.is_authenticated:
-        return redirect(url_for('index'))  # Changed: redirect to index with instructions
-    
-    if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        password = request.form.get('password', '')
-        
-        users = load_users()
-        
-        # Find user
-        user_id = None
-        for uid, user_data in users.items():
-            if user_data['username'] == username:
-                user_id = uid
-                break
-        
-        if user_id and users[user_id]['password'] == hash_password(password):
-            user = User(user_id, username)
-            login_user(user)
-            app.logger.info(f"User logged in: {username} ({user_id})")
-            
-            next_page = request.args.get('next')
-            return redirect(next_page if next_page else url_for('index'))  # Changed: go to index first
-        else:
-            flash('Invalid username or password', 'error')
-    
-    return render_template('login.html')
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    """Registration page"""
-    if current_user.is_authenticated:
-        return redirect(url_for('index'))  # Changed: redirect to index with instructions
-    
-    if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        password = request.form.get('password', '')
-        
-        if not username or not password:
-            flash('Username and password are required', 'error')
-            return render_template('register.html')
-        
-        if len(password) < 6:
-            flash('Password must be at least 6 characters', 'error')
-            return render_template('register.html')
-        
-        users = load_users()
-        
-        # Check if username exists
-        for user_data in users.values():
-            if user_data['username'] == username:
-                flash('Username already exists', 'error')
-                return render_template('register.html')
-        
-        # Create new user
-        user_id = secrets.token_urlsafe(16)
-        users[user_id] = {
-            'username': username,
-            'password': hash_password(password),
-            'created_at': time.time()
-        }
-        save_users(users)
-        
-        # Create user directories
-        os.makedirs(os.path.join(os.getenv('LOGS_DIR', 'logs'), user_id), exist_ok=True)
-        os.makedirs(os.path.join(os.getenv('DATA_DIR', 'data'), user_id), exist_ok=True)
-        
-        app.logger.info(f"New user registered: {username} ({user_id})")
-        flash('Registration successful! Please login.', 'success')
-        return redirect(url_for('login'))
-    
-    return render_template('register.html')
-
-@app.route('/logout')
-@login_required
-def logout():
-    """Logout"""
-    username = current_user.username
-    logout_user()
-    app.logger.info(f"User logged out: {username}")
-    flash('You have been logged out.', 'info')
-    return redirect(url_for('login'))
+def archive_session_wrapper(wrapper: Optional[SessionWrapper]) -> None:
+    """Best-effort export of a finished session's data to Google Drive (once)."""
+    if not wrapper or wrapper.archived:
+        return
+    wrapper.archived = True
+    try:
+        session = wrapper.interview_session
+        data_dir = os.path.join(os.getenv('DATA_DIR', 'data'), wrapper.user_id)
+        drive_export.archive_session(
+            user_id=wrapper.user_id,
+            session_id=getattr(session, 'session_id', 0),
+            extra_dirs=[data_dir] if os.path.isdir(data_dir) else None,
+        )
+    except Exception as e:
+        app.logger.warning(f"Drive archive failed for {wrapper.user_id}: {e}")
 
 # =============================================================================
-# PAGE ROUTES - PROTECTED (REQUIRE LOGIN)
+# PAGE ROUTES - PUBLIC (no login; the user just picks a conversation type)
 # =============================================================================
 
 @app.route('/')
-@login_required  # MUST BE LOGGED IN TO SEE INSTRUCTIONS
 def index():
-    """Landing page with instructions - shown after login"""
-    return render_template('index.html', username=current_user.username)
+    """Landing page: pick a conversation type, then start."""
+    types = [
+        {"key": key, **{k: v for k, v in cfg.items() if k != "description" and k != "plan_file"}}
+        for key, cfg in CONVERSATION_TYPES.items()
+    ]
+    return render_template('select.html', conversation_types=types)
 
 @app.route('/chat')
-@login_required  # MUST BE LOGGED IN
 def unified_chat():
-    """Unified chat interface"""
-    return render_template('chat.html', username=current_user.username)
+    """Unified chat interface. Session is created via /api/start-session."""
+    return render_template('chat.html')
 
 # =============================================================================
 # API ENDPOINTS - PROTECTED (REQUIRE LOGIN)
-# All endpoints that handle interview data need @login_required
+# Public endpoints keyed by an opaque session_token (no login).
 # =============================================================================
 
 @app.route('/api/start-session', methods=['POST'])
-@login_required  # PROTECTED
 def start_session():
-    """Initialize a new interview session using authenticated user's ID"""
-    user_id = current_user.id
-    
-    # DEBUG: Log every request
-    call_stack = ''.join(traceback.format_stack()[-3:-1])
-    app.logger.info(f"[DEBUG] start-session called by user {current_user.username}")
-    print(f"[DEBUG] start-session request from {current_user.username} (user_id: {user_id})")
-    
-    # Check if user already has an active session
+    """Initialize a new interview session for an anonymous web visitor.
+
+    Body (JSON, all optional):
+        conversation_type: one of CONVERSATION_TYPES keys (default ai_workforce)
+        custom_description: free text, used when conversation_type == "custom"
+        user_id: pass an existing id to resume; otherwise a fresh one is minted
+    """
+    data = request.get_json(silent=True) or {}
+    conversation_type = data.get('conversation_type') or DEFAULT_CONVERSATION_TYPE
+    custom_description = data.get('custom_description')
+
+    # Anonymous identity: reuse a client-supplied id (resume) or mint a new one.
+    user_id = (data.get('user_id') or '').strip() or f"web_{uuid.uuid4().hex[:16]}"
+
+    # If this user already has a live session, hand it back rather than duplicate.
     for token, wrapper in active_sessions.items():
-        if wrapper.user_id == user_id:
-            # Return existing session instead of creating duplicate
-            app.logger.info(f"Returning existing session {token} for user {current_user.username}")
-            print(f"[Session] Reusing existing session {token} for {current_user.username}")
+        if wrapper.user_id == user_id and wrapper.interview_session.session_in_progress:
+            app.logger.info(f"Returning existing session {token} for {user_id}")
             return jsonify({
                 'success': True,
                 'session_token': token,
                 'session_id': wrapper.interview_session.session_id,
                 'user_id': user_id,
-                'username': current_user.username,
+                'conversation_type': wrapper.conversation_type,
                 'message': 'Using existing session',
                 'was_existing': True
             })
-    
-    # Create new session only if none exists
-    interview_session, session_token = create_interview_session(user_id=user_id)
 
-    app.logger.info(f"Session created: {session_token} | User: {current_user.username} ({user_id})")
-    print(f"[Session] Created NEW session {session_token} for user {current_user.username}")
+    interview_session, session_token = create_interview_session(
+        user_id=user_id,
+        conversation_type=conversation_type,
+        custom_description=custom_description,
+    )
+
+    app.logger.info(f"Session created: {session_token} | user {user_id} | type {conversation_type}")
+    print(f"[Session] Created session {session_token} for {user_id} (type: {conversation_type})")
 
     return jsonify({
         'success': True,
         'session_token': session_token,
         'session_id': interview_session.session_id,
         'user_id': user_id,
-        'username': current_user.username,
+        'conversation_type': conversation_type,
         'message': 'Session started successfully',
         'was_existing': False
     })
 
 @app.route('/api/send-message', methods=['POST'])
-@login_required  # PROTECTED
 def send_message():
     """Send a text message to the interview session"""
     data = request.json
@@ -404,7 +354,6 @@ def send_message():
     })
 
 @app.route('/api/send-voice', methods=['POST'])
-@login_required  # PROTECTED
 def send_voice():
     """Send a voice message to the interview session"""
     session_token = request.form.get('session_token')
@@ -452,7 +401,6 @@ def send_voice():
             temp_audio_path.unlink()
 
 @app.route('/api/get-messages', methods=['GET'])
-@login_required  # PROTECTED
 def get_messages():
     """Get new messages from the session (polling endpoint)"""
     session_token = request.args.get('session_token')
@@ -491,6 +439,8 @@ def get_messages():
             is_session_done = True
 
     if is_session_done:
+        # Session finished on its own -> archive its data to Drive (best-effort, once).
+        archive_session_wrapper(get_session_wrapper(session_token))
         end_msg_id = f"system_end_{session_token}"
         if not any(m.get('id') == end_msg_id for m in messages):
             messages.append({
@@ -508,7 +458,6 @@ def get_messages():
     })
 
 @app.route('/api/acknowledge-messages', methods=['POST'])
-@login_required  # PROTECTED
 def acknowledge_messages():
     """Mark messages as acknowledged by the client"""
     data = request.json
@@ -535,7 +484,6 @@ def acknowledge_messages():
     return jsonify({'success': True})
 
 @app.route('/api/get-voice-response', methods=['GET'])
-@login_required  # PROTECTED
 def get_voice_response():
     """Get the latest interviewer message as voice audio"""
     session_token = request.args.get('session_token')
@@ -655,7 +603,6 @@ def get_voice_response():
     return ('', 202)  # Tell client to poll again
 
 @app.route('/api/end-session', methods=['POST'])
-@login_required  # PROTECTED
 def end_session():
     """End the interview session - background tasks will complete gracefully"""
     data = request.json
@@ -673,6 +620,9 @@ def end_session():
     # End the session (marks as not in progress, stops new tasks)
     session.end_session()
 
+    # Archive the completed interview to Drive (best-effort, once).
+    archive_session_wrapper(wrapper)
+
     app.logger.info(f"Session {session_token} ended by user, background tasks will complete")
 
     # Don't remove from active_sessions yet - let background tasks complete
@@ -686,7 +636,6 @@ def end_session():
     })
 
 @app.route('/api/session-status', methods=['GET'])
-@login_required  # PROTECTED
 def session_status():
     """Get current session status including background task progress"""
     session_token = request.args.get('session_token')
@@ -723,7 +672,6 @@ def session_status():
     })
 
 @app.route('/api/debug-session', methods=['GET'])
-@login_required  # PROTECTED
 def debug_session():
     """Development-only: return session internals"""
     session_token = request.args.get('session_token')
@@ -769,7 +717,6 @@ def debug_session():
     })
 
 @app.route('/process_audio', methods=['POST'])
-@login_required  # PROTECTED
 def process_audio():
     """Compatibility route for older speech_chat.html template"""
     session_token = request.form.get('session_token')
@@ -778,8 +725,10 @@ def process_audio():
     if not audio_file:
         return jsonify({'success': False, 'error': 'No audio file provided'}), 400
 
-    user_id = current_user.id
-    
+    # Reuse the session's own user_id, or mint an anonymous one.
+    existing = get_session_wrapper(session_token) if session_token else None
+    user_id = existing.user_id if existing else f"web_{uuid.uuid4().hex[:16]}"
+
     if not session_token:
         interview_session, session_token = create_interview_session(user_id=user_id)
     else:
@@ -826,7 +775,6 @@ def process_audio():
             temp_audio_path.unlink()
 
 @app.route('/get_last_messages', methods=['GET'])
-@login_required  # PROTECTED
 def get_last_messages():
     """Get last messages for session"""
     session_token = request.args.get('session_token')

@@ -1,0 +1,38 @@
+[
+    {
+        "topic": "Background & Current Role",
+        "subtopics": [
+            "Educational background or training",
+            "Current job title and what the role involves day to day",
+            "Industry or sector and type of organization",
+            "Years of experience and career stage"
+        ]
+    },
+    {
+        "topic": "Career Journey",
+        "subtopics": [
+            "How they got started in their field",
+            "Key turning points, pivots, or decisions along the way",
+            "Roles or projects they are most proud of",
+            "Mentors, influences, or experiences that shaped them"
+        ]
+    },
+    {
+        "topic": "Motivation & Values",
+        "subtopics": [
+            "What they find most meaningful or energizing in their work",
+            "What they find draining or frustrating",
+            "How they define success for themselves",
+            "How their priorities have changed over time"
+        ]
+    },
+    {
+        "topic": "Growth & Aspirations",
+        "subtopics": [
+            "Skills or areas they are actively trying to develop",
+            "Where they hope to be in a few years",
+            "Challenges or obstacles they are navigating",
+            "Advice they would give their earlier self"
+        ]
+    }
+]

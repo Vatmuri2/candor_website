@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+logs
+data/logs
+data/data
+.env
+*.log
+.DS_Store
+.pytest_cache
+node_modules

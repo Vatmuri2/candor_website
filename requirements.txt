@@ -126,3 +126,9 @@ flask==3.1.2
 flask-cors==6.0.1
 flask-login
 google-cloud-storage
+# Web server for container deploys (Render / Cloud Run)
+gunicorn==23.0.0
+# Optional: Google Drive archival of finished interviews (service account)
+google-api-python-client==2.149.0
+google-auth-httplib2==0.2.0
+httplib2==0.22.0
