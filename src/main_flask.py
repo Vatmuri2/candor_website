@@ -27,6 +27,10 @@ from src.utils.speech.speech_to_text import create_stt_engine
 from src.interview_session.interview_session import InterviewSession
 from src.utils.storage import drive_export
 
+# Second interviewer (vendored from github.com/rdrivers/candor), OpenAI-backed.
+from bots.candor.interviewer import CandorInterviewer
+from bots.candor import prompts as candor_prompts
+
 load_dotenv(override=True)
 
 # =============================================================================
@@ -176,6 +180,9 @@ active_sessions: Dict[str, SessionWrapper] = {}
 last_messages_by_session: Dict[str, Dict[str, str]] = {}
 session_audio_cache: Dict[str, Dict[str, object]] = {}
 
+# In-memory store for candor interviewer sessions (the second bot).
+candor_sessions: Dict[str, CandorInterviewer] = {}
+
 def create_interview_session(user_id: str, conversation_type: Optional[str] = None,
                              custom_description: Optional[str] = None) -> tuple[InterviewSession, str]:
     """Create an interview session for an anonymous web user + chosen topic."""
@@ -264,6 +271,16 @@ def index():
 def unified_chat():
     """Unified chat interface. Session is created via /api/start-session."""
     return render_template('chat.html')
+
+@app.route('/compare')
+def compare():
+    """Split-screen: the SparkMe interviewer and the candor interviewer,
+    same topic, side by side."""
+    types = [
+        {"key": key, **{k: v for k, v in cfg.items() if k not in ("description", "plan_file")}}
+        for key, cfg in CONVERSATION_TYPES.items()
+    ]
+    return render_template('compare.html', conversation_types=types)
 
 # =============================================================================
 # API ENDPOINTS - PROTECTED (REQUIRE LOGIN)
@@ -787,6 +804,78 @@ def get_last_messages():
         'user_message': msgs.get('user_message', ''),
         'bot_reply': msgs.get('bot_reply', '')
     })
+
+# =============================================================================
+# CANDOR INTERVIEWER (second bot) — simple turn-by-turn endpoints
+# =============================================================================
+
+@app.route('/api/candor/start', methods=['POST'])
+def candor_start():
+    """Start a candor interview on the same topic used for SparkMe.
+
+    Body: { conversation_type, custom_description } (same shape as start-session).
+    Returns a candor_token and the interviewer's first question.
+    """
+    data = request.get_json(silent=True) or {}
+    conversation_type = data.get('conversation_type') or DEFAULT_CONVERSATION_TYPE
+    custom_description = data.get('custom_description')
+
+    # Use the SAME topic text SparkMe gets, so both bots interview on one topic.
+    description, _ = resolve_conversation(conversation_type, custom_description)
+    topic_desc = candor_prompts.topic_desc_from_text(description)
+
+    try:
+        bot = CandorInterviewer(topic_desc)
+        question, flags = bot.first_question()
+    except Exception as e:
+        app.logger.error(f"candor start failed: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+    token = str(uuid.uuid4())
+    candor_sessions[token] = bot
+    return jsonify({
+        'success': True,
+        'candor_token': token,
+        'question': question,
+        'flags': flags,
+    })
+
+
+@app.route('/api/candor/message', methods=['POST'])
+def candor_message():
+    """Send the user's answer to candor; returns its next question."""
+    data = request.get_json(silent=True) or {}
+    token = data.get('candor_token')
+    message = (data.get('message') or '').strip()
+
+    bot = candor_sessions.get(token)
+    if not bot:
+        return jsonify({'success': False, 'error': 'Invalid or expired candor session'}), 400
+    if not message:
+        return jsonify({'success': False, 'error': 'Empty message'}), 400
+
+    try:
+        question, flags = bot.answer(message)
+    except Exception as e:
+        app.logger.error(f"candor message failed: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+    return jsonify({
+        'success': True,
+        'question': question,
+        'flags': flags,
+        'stats': bot.stats,
+    })
+
+
+@app.route('/api/candor/end', methods=['POST'])
+def candor_end():
+    """Drop a candor session from memory (best-effort)."""
+    data = request.get_json(silent=True) or {}
+    token = data.get('candor_token')
+    candor_sessions.pop(token, None)
+    return jsonify({'success': True})
+
 
 # =============================================================================
 # HEALTH CHECK - NOT PROTECTED (for monitoring)

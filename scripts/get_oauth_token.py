@@ -15,8 +15,12 @@ Prereqs:
      Download the client secret JSON.
   2. Make sure the Google Drive API is enabled in that project.
 
-Usage:
+Usage (either form):
     python scripts/get_oauth_token.py /path/to/client_secret.json
+    python scripts/get_oauth_token.py <CLIENT_ID> <CLIENT_SECRET>
+
+The two-argument form is handy when the console won't let you download the JSON
+(newer consoles only show the secret once) — just paste the client id + secret.
 """
 import sys
 
@@ -26,13 +30,23 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
 def main():
-    if len(sys.argv) != 2:
+    if len(sys.argv) == 2:
+        flow = InstalledAppFlow.from_client_secrets_file(sys.argv[1], SCOPES)
+    elif len(sys.argv) == 3:
+        client_id, client_secret = sys.argv[1], sys.argv[2]
+        config = {
+            "installed": {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": ["http://localhost"],
+            }
+        }
+        flow = InstalledAppFlow.from_client_config(config, SCOPES)
+    else:
         print(__doc__)
         sys.exit(1)
-
-    client_secret_path = sys.argv[1]
-
-    flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, SCOPES)
     # Opens a browser; log in with the account that should OWN the files.
     creds = flow.run_local_server(
         port=0,
