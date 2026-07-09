@@ -202,7 +202,10 @@ def record_session_metadata(session, meta) -> None:
         end_reason=getattr(closer, 'state', None),
         engagement_stats=monitor.stats() if monitor is not None else None,
         closer_stats=closer.stats() if closer is not None else None,
-        context_bias=getattr(session, 'context_bias_reports', None),
+        # NOTE: the DB column is still named context_bias; we now record the
+        # researched/approved background context there.
+        context_bias=([getattr(session, 'retrieved_context')]
+                      if getattr(session, 'retrieved_context', None) else None),
         transcript=transcript)
 
 
@@ -229,7 +232,12 @@ def unified_chat():
 
 @app.route('/api/start-session', methods=['POST'])
 def start_session():
-    """Start a new interview: build the session, generate the opening question."""
+    """Start a new interview: build the session and research background context.
+
+    The interview does NOT open yet — we return a researched briefing for the
+    participant to approve (see /api/approve-context), then that approved context
+    seeds the conversation.
+    """
     data = request.get_json(silent=True) or {}
     conversation_type = data.get('conversation_type') or DEFAULT_CONVERSATION_TYPE
     custom_description = data.get('custom_description')
@@ -239,17 +247,78 @@ def start_session():
     meta = session_meta(user_id, conversation_type, custom_description)
     session = build_session(meta)
 
-    opening = asyncio.run(session.start())
-    outbox = _as_messages(opening)
-    status = _status_for(session)
-    session_store.save(token, session, meta, outbox, status)
+    try:
+        context = asyncio.run(session.research_context())
+    except Exception as e:
+        app.logger.warning(f"context research failed for {user_id}: {e}")
+        context = {"topic": meta["interview_description"], "context": "",
+                   "sources": [], "ok": False, "error": str(e)}
+    session_store.save(token, session, meta, [], "awaiting_context")
 
-    app.logger.info(f"Session started: {token} | user {user_id} | type {conversation_type}")
+    app.logger.info(f"Session started (awaiting context approval): {token} | "
+                    f"user {user_id} | type {conversation_type}")
     return jsonify({
         'success': True, 'session_token': token,
         'session_id': session.session_id, 'user_id': user_id,
         'conversation_type': conversation_type, 'was_existing': False,
+        'needs_context_approval': True,
+        'interview_description': meta["interview_description"],
+        'context': context,
     })
+
+
+@app.route('/api/research-context', methods=['POST'])
+def research_context():
+    """Re-run topic research for an existing (not-yet-started) session.
+
+    Powers the popup's "Search again" button. Bypasses the per-topic cache so the
+    operator can get a fresh briefing.
+    """
+    data = request.json or {}
+    token = data.get('session_token')
+    loaded = session_store.load(token, build_session)
+    if loaded is None:
+        return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
+    session, meta = loaded
+    try:
+        result = asyncio.run(
+            session.context_research_agent.research_topic(meta["interview_description"]))
+        context = result.to_dict()
+        context["from_cache"] = False
+        session.retrieved_context = context
+    except Exception as e:
+        app.logger.warning(f"re-research failed for {meta['user_id']}: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    session_store.save(token, session, meta, [], "awaiting_context")
+    return jsonify({'success': True, 'context': context})
+
+
+@app.route('/api/approve-context', methods=['POST'])
+def approve_context():
+    """Approve (optionally edited) background context and open the interview."""
+    data = request.json or {}
+    token = data.get('session_token')
+    approved_text = (data.get('context') or '').strip()
+
+    loaded = session_store.load(token, build_session)
+    if loaded is None:
+        return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
+    session, meta = loaded
+
+    # Idempotent: if the interview already opened, just replay the outbox.
+    if session.chat_history:
+        return jsonify({'success': True, 'messages': [], 'already_started': True})
+
+    if not approved_text:
+        approved_text = (session.retrieved_context or {}).get('context', '')
+
+    opening = asyncio.run(session.start(approved_context=approved_text))
+    outbox = _as_messages(opening)
+    status = _status_for(session)
+    session_store.save(token, session, meta, outbox, status)
+
+    app.logger.info(f"Context approved, interview opened: {token} | user {meta['user_id']}")
+    return jsonify({'success': True, 'messages': outbox})
 
 
 @app.route('/api/send-message', methods=['POST'])

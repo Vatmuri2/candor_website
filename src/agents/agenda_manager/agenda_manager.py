@@ -97,9 +97,25 @@ class AgendaManager(BaseAgent, Participant):
                 ))
                 self._last_interviewer_message = None
      
-    async def augment_session_agenda(self, additional_context_path: Optional[str] = None):
-        # If there is existing user profile, we load them
-        if additional_context_path and os.path.exists(additional_context_path):
+    async def augment_session_agenda(self, additional_context_path: Optional[str] = None,
+                                     approved_context: Optional[str] = None):
+        """Seed the session agenda from background context.
+
+        Preference order: the participant-approved researched briefing
+        (approved_context), otherwise a file at additional_context_path.
+        """
+        additional_context = None
+
+        # 1) Participant-approved researched context wins.
+        if approved_context and approved_context.strip():
+            additional_context = approved_context
+            SessionLogger.log_to_file(
+                "execution_log",
+                f"[CONTEXT_RESEARCH] seeding agenda with approved context "
+                f"({len(additional_context)} chars)."
+            )
+        # 2) Otherwise fall back to a context file, if one is configured.
+        elif additional_context_path and os.path.exists(additional_context_path):
             if additional_context_path.endswith('.txt') or additional_context_path.endswith('.md'):
                 with open(additional_context_path, 'r', encoding='utf-8') as f:
                     additional_context = f.read()
@@ -109,33 +125,11 @@ class AgendaManager(BaseAgent, Participant):
                 SessionLogger.log_to_file(
                     "execution_log", f"[INIT] Existing user profile is IGNORED, currently only supports .txt, .md, and .pdf files"
                 )
-            
-            # Found initial context to be initialized with
             SessionLogger.log_to_file(
                 "execution_log", f"[RUN] Found initial context to be initialized with, preparing an optimized session!"
             )
 
-            # Check the context for bias before using it to seed the agenda. If
-            # it's clearly slanted, swap in the neutralized version instead.
-            bias_agent = getattr(self.interview_session, "context_bias_agent", None)
-            if bias_agent is not None:
-                try:
-                    report = await bias_agent.report(additional_context, use_llm=True)
-                    report["source_path"] = additional_context_path
-                    self.interview_session.context_bias_reports.append(report)
-                    neutralized = (report.get("llm") or {}).get("neutralized_context")
-                    if neutralized and report.get("slant_score", 0) >= 0.4:
-                        SessionLogger.log_to_file(
-                            "execution_log",
-                            f"[CONTEXT_BIAS] slant={report.get('slant_score')} >= 0.4; "
-                            f"using neutralized context for agenda seeding."
-                        )
-                        additional_context = neutralized
-                except Exception as e:
-                    SessionLogger.log_to_file(
-                        "execution_log", f"[CONTEXT_BIAS] analysis skipped: {e}"
-                    )
-
+        if additional_context:
             # Get user portrait and last meeting summary
             await asyncio.gather(
                 self.interview_session.agenda_manager._update_user_portrait(

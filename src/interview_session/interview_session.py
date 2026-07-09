@@ -15,7 +15,7 @@ from src.agents.agenda_manager.agenda_manager import AgendaManager, AgendaManage
 from src.agents.exploration_planner.exploration_planner import ExplorationPlanner, ExplorationPlannerConfig
 from src.agents.engagement.engagement_monitor import EngagementMonitor
 from src.agents.conversation_closer.conversation_closer import ConversationCloser
-from src.agents.context.context_bias import ContextBiasAgent
+from src.agents.context.context_research import ContextResearchAgent, ContextResearchResult
 from src.agents.user.user_agent import UserAgent
 from src.content.session_agenda.session_agenda import SessionAgenda
 from src.utils.data_process import save_feedback_to_csv
@@ -239,18 +239,21 @@ class InterviewSession:
             topic_name=self._interview_description
         )
 
-        # Context bias agent: evaluates compiled source material for slant so it
-        # is measured (and attributable) rather than silently smuggled into the
-        # interviewer's questions. Does not scrub substance.
-        context_model = os.getenv("CONTEXT_BIAS_MODEL_NAME")
+        # Context research agent: researches background about the interview topic
+        # (via web search) and produces a briefing that seeds the interview. The
+        # briefing is shown to the participant for approval before the interview
+        # starts, then reused across conversations on the same topic.
+        context_model = os.getenv("CONTEXT_SEARCH_MODEL_NAME")
         context_cfg = {}
         if context_model:
             context_cfg["model_name"] = context_model
-        self.context_bias_agent = ContextBiasAgent(
+        self.context_research_agent = ContextResearchAgent(
             config=context_cfg, interview_session=self
         )
-        # Bias reports produced during this session (persisted with the logs).
-        self.context_bias_reports: List[dict] = []
+        # The researched briefing (dict) offered for approval, and the text the
+        # participant approved to seed the interview with.
+        self.retrieved_context: Optional[dict] = None
+        self.approved_context: Optional[str] = None
 
         # Subscriptions of participants to each other
         self._subscriptions: Dict[str, List[Participant]] = {
@@ -447,15 +450,65 @@ class InterviewSession:
             return [m["content"] for m in msgs if m.get("role") == "Interviewer"]
         return []
 
-    async def start(self) -> List[str]:
-        """Set up the agenda and generate the opening question. Run once per session."""
+    async def research_context(self) -> dict:
+        """Research background context for this interview's topic.
+
+        Returns a briefing dict (see ContextResearchResult.to_dict) to show the
+        participant for approval. Reuses a cached, previously-approved briefing for
+        the same topic when one exists (see utils.storage.context_store).
+        """
+        from src.utils.storage import context_store
+
+        cached = context_store.get(self._interview_description)
+        if cached and cached.get("context"):
+            cached["from_cache"] = True
+            self.retrieved_context = cached
+            SessionLogger.log_to_file(
+                "execution_log",
+                f"[CONTEXT_RESEARCH] reusing cached context for "
+                f"{self._interview_description!r}"
+            )
+            return cached
+
+        result = await self.context_research_agent.research_topic(
+            self._interview_description)
+        data = result.to_dict()
+        data["from_cache"] = False
+        self.retrieved_context = data
+        return data
+
+    async def start(self, approved_context: Optional[str] = None) -> List[str]:
+        """Seed the agenda (optionally with approved context) and open the interview.
+
+        Run once per session. If approved_context is given it seeds the agenda and
+        is cached for reuse on this topic; otherwise we fall back to any configured
+        additional_context_path.
+        """
+        if approved_context is not None:
+            self.approved_context = approved_context
+            self._cache_approved_context(approved_context)
+
         await self.agenda_manager.augment_session_agenda(
-            additional_context_path=self._initial_additional_context_path)
+            additional_context_path=self._initial_additional_context_path,
+            approved_context=self.approved_context)
         self.session_in_progress = True
         # Interviewer opens the conversation.
         await self._interviewer.on_message(None)
         await self._drain()
         return self._collect_interviewer_messages()
+
+    def _cache_approved_context(self, approved_context: str) -> None:
+        """Persist the approved briefing for reuse across conversations."""
+        try:
+            from src.utils.storage import context_store
+            record = dict(self.retrieved_context or {})
+            record["context"] = approved_context
+            record["topic"] = self._interview_description
+            record["approved"] = True
+            context_store.put(self._interview_description, record, approved=True)
+        except Exception as e:
+            SessionLogger.log_to_file(
+                "execution_log", f"[CONTEXT_RESEARCH] cache write failed: {e}")
 
     async def run_one_turn(self, user_text: str) -> List[str]:
         """Feed one user message through the pipeline and return the reply."""
@@ -474,7 +527,7 @@ class InterviewSession:
             "agenda_manager": self.agenda_manager,
             "exploration_planner": self.exploration_planner,
             "engagement_monitor": self.engagement_monitor,
-            "context_bias_agent": self.context_bias_agent,
+            "context_research_agent": self.context_research_agent,
         }
 
     def to_state(self) -> dict:
@@ -496,7 +549,8 @@ class InterviewSession:
             "max_turns": self.max_turns,
             "interview_description": self._interview_description,
             "chat_history": [m.model_dump(mode="json") for m in self.chat_history],
-            "context_bias_reports": self.context_bias_reports,
+            "retrieved_context": self.retrieved_context,
+            "approved_context": self.approved_context,
             "event_streams": {
                 name: [e.model_dump(mode="json") for e in agent.event_stream]
                 for name, agent in self._agents_for_state().items()
@@ -529,7 +583,8 @@ class InterviewSession:
         self.session_completed = state["session_completed"]
         self._user_message_count = state.get("user_message_count", 0)
         self.max_turns = state.get("max_turns")
-        self.context_bias_reports = state.get("context_bias_reports", [])
+        self.retrieved_context = state.get("retrieved_context")
+        self.approved_context = state.get("approved_context")
         self.chat_history = [Message(**m) for m in state.get("chat_history", [])]
 
         streams = state.get("event_streams", {})

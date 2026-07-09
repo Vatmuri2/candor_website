@@ -45,6 +45,42 @@
         .start-btn:disabled { opacity: .5; cursor: not-allowed; }
         #status { color: #888; font-size: 14px; }
         .privacy { margin-top: 22px; font-size: 12.5px; color: #999; line-height: 1.5; }
+
+        /* ---- context approval modal ---- */
+        .modal-overlay {
+            display: none; position: fixed; inset: 0; background: rgba(20,20,35,.55);
+            align-items: center; justify-content: center; padding: 20px; z-index: 50;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal {
+            width: 100%; max-width: 720px; max-height: 88vh; overflow-y: auto; background: #fff;
+            border-radius: 14px; box-shadow: 0 24px 70px rgba(0,0,0,.4); padding: 28px 30px;
+        }
+        .modal h2 { color: #2d2d3a; font-size: 22px; margin-bottom: 6px; }
+        .modal .modal-sub { color: #666; font-size: 14px; line-height: 1.5; margin-bottom: 18px; }
+        .modal .topic-pill {
+            display: inline-block; background: #f0f3ff; color: #4b4bd6; font-weight: 600;
+            font-size: 13px; padding: 5px 12px; border-radius: 999px; margin-bottom: 16px;
+        }
+        #context-text {
+            width: 100%; min-height: 260px; padding: 14px; border: 2px solid #e6e6ef;
+            border-radius: 10px; font-size: 14px; line-height: 1.55; font-family: inherit;
+            resize: vertical; color: #2d2d3a;
+        }
+        #context-text:focus { outline: none; border-color: #667eea; }
+        .sources { margin-top: 16px; }
+        .sources h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #999; margin-bottom: 8px; }
+        .sources ul { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+        .sources a { color: #4b4bd6; font-size: 13.5px; text-decoration: none; word-break: break-word; }
+        .sources a:hover { text-decoration: underline; }
+        .source-empty { color: #aaa; font-size: 13px; }
+        .modal-actions { margin-top: 24px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .btn-secondary {
+            padding: 12px 22px; background: #eef0f7; color: #4b4bd6; border: none; border-radius: 8px;
+            font-size: 15px; font-weight: 600; cursor: pointer;
+        }
+        .btn-secondary:disabled, .start-btn:disabled { opacity: .5; cursor: not-allowed; }
+        #modal-status { color: #888; font-size: 13.5px; }
     </style>
 </head>
 <body>
@@ -72,6 +108,22 @@
         </div>
 
         <p class="privacy">You don't need to share personally identifying information. Conversations may be recorded and stored for research and quality purposes.</p>
+    </div>
+
+    <!-- Context approval modal -->
+    <div class="modal-overlay" id="context-modal">
+        <div class="modal">
+            <h2>📚 Review the background context</h2>
+            <p class="modal-sub">We researched some current background on this topic. Review it (and edit if you like) — the interviewer will use this to inform the conversation.</p>
+            <span class="topic-pill" id="context-topic"></span>
+            <textarea id="context-text" spellcheck="false"></textarea>
+            <div class="sources" id="context-sources"></div>
+            <div class="modal-actions">
+                <button id="approve-btn" class="start-btn">Approve &amp; begin →</button>
+                <button id="research-again-btn" class="btn-secondary">Search again</button>
+                <span id="modal-status"></span>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -124,9 +176,12 @@
                 const data = await res.json();
                 if (data.success) {
                     localStorage.setItem('candor_user_id', data.user_id);
-                    sessionStorage.setItem('candor_session_token', data.session_token);
-                    sessionStorage.setItem('candor_conversation_type', data.conversation_type || selectedKey);
-                    window.location.href = '/chat';
+                    pendingSession = {
+                        token: data.session_token,
+                        conversationType: data.conversation_type || selectedKey,
+                    };
+                    statusEl.textContent = '';
+                    showContextModal(data.interview_description, data.context);
                 } else {
                     statusEl.textContent = 'Could not start: ' + (data.error || 'unknown error');
                     startBtn.disabled = false;
@@ -135,6 +190,93 @@
                 console.error(e);
                 statusEl.textContent = 'Network error — please try again.';
                 startBtn.disabled = false;
+            }
+        });
+
+        // ================= Context approval modal =================
+        let pendingSession = null;
+
+        const modal = document.getElementById('context-modal');
+        const contextTopic = document.getElementById('context-topic');
+        const contextText = document.getElementById('context-text');
+        const contextSources = document.getElementById('context-sources');
+        const approveBtn = document.getElementById('approve-btn');
+        const researchAgainBtn = document.getElementById('research-again-btn');
+        const modalStatus = document.getElementById('modal-status');
+
+        function renderSources(sources) {
+            if (!sources || !sources.length) {
+                contextSources.innerHTML = '<p class="source-empty">No sources cited.</p>';
+                return;
+            }
+            const items = sources.map(s => {
+                const url = (typeof s === 'string') ? s : s.url;
+                const title = (typeof s === 'string') ? s : (s.title || s.url);
+                return `<li><a href="${url}" target="_blank" rel="noopener">${title}</a></li>`;
+            }).join('');
+            contextSources.innerHTML = `<h3>Sources</h3><ul>${items}</ul>`;
+        }
+
+        function fillContext(context) {
+            context = context || {};
+            contextText.value = context.context || '';
+            renderSources(context.sources);
+            if (context.ok === false) {
+                modalStatus.textContent = 'Automatic research failed — you can write the context manually or try again.';
+            } else {
+                modalStatus.textContent = '';
+            }
+        }
+
+        function showContextModal(topic, context) {
+            contextTopic.textContent = topic || '';
+            fillContext(context);
+            modal.classList.add('show');
+        }
+
+        researchAgainBtn.addEventListener('click', async () => {
+            if (!pendingSession) return;
+            researchAgainBtn.disabled = true; approveBtn.disabled = true;
+            modalStatus.textContent = 'Searching the web…';
+            try {
+                const res = await fetch('/api/research-context', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_token: pendingSession.token })
+                });
+                const data = await res.json();
+                if (data.success) fillContext(data.context);
+                else modalStatus.textContent = 'Search failed: ' + (data.error || 'unknown error');
+            } catch (e) {
+                modalStatus.textContent = 'Network error — please try again.';
+            } finally {
+                researchAgainBtn.disabled = false; approveBtn.disabled = false;
+            }
+        });
+
+        approveBtn.addEventListener('click', async () => {
+            if (!pendingSession) return;
+            approveBtn.disabled = true; researchAgainBtn.disabled = true;
+            modalStatus.textContent = 'Starting your interview…';
+            try {
+                const res = await fetch('/api/approve-context', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_token: pendingSession.token,
+                        context: contextText.value.trim(),
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    sessionStorage.setItem('candor_session_token', pendingSession.token);
+                    sessionStorage.setItem('candor_conversation_type', pendingSession.conversationType);
+                    window.location.href = '/chat';
+                } else {
+                    modalStatus.textContent = 'Could not start: ' + (data.error || 'unknown error');
+                    approveBtn.disabled = false; researchAgainBtn.disabled = false;
+                }
+            } catch (e) {
+                modalStatus.textContent = 'Network error — please try again.';
+                approveBtn.disabled = false; researchAgainBtn.disabled = false;
             }
         });
     </script>

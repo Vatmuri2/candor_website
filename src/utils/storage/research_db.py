@@ -113,6 +113,17 @@ _DDL = [
         updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+    # Approved background context, cached per topic so it can be reused across
+    # conversations. One row per topic key (see context_store).
+    """
+    CREATE TABLE IF NOT EXISTS topic_context (
+        topic_key   TEXT PRIMARY KEY,
+        topic       TEXT,
+        context     JSONB NOT NULL,
+        approved    BOOLEAN NOT NULL DEFAULT false,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
 ]
 
 
@@ -376,3 +387,47 @@ def delete_web_session(token: str) -> None:
             conn.execute(text("DELETE FROM web_sessions WHERE token = :t"), {"t": token})
     except Exception as e:
         logger.warning(f"delete_web_session failed for {token}: {e}")
+
+
+# ---- per-topic background context ----
+
+def get_topic_context(topic_key: str):
+    """Return the cached context dict for a topic key, or None."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return None
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT context FROM topic_context WHERE topic_key = :k"),
+                {"k": topic_key},
+            ).fetchone()
+        return row[0] if row is not None else None
+    except Exception as e:
+        logger.warning(f"get_topic_context failed for {topic_key}: {e}")
+        return None
+
+
+def save_topic_context(topic_key: str, topic: str, context: dict,
+                       approved: bool = True) -> bool:
+    """Store/replace the cached context for a topic key. Returns True on success."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return False
+    try:
+        from sqlalchemy import text
+        stmt = text("""
+            INSERT INTO topic_context (topic_key, topic, context, approved, updated_at)
+            VALUES (:k, :topic, CAST(:context AS JSONB), :approved, now())
+            ON CONFLICT (topic_key) DO UPDATE SET
+                topic = EXCLUDED.topic, context = EXCLUDED.context,
+                approved = EXCLUDED.approved, updated_at = now()
+        """)
+        with engine.begin() as conn:
+            conn.execute(stmt, {"k": topic_key, "topic": topic,
+                                "context": json.dumps(context), "approved": approved})
+        return True
+    except Exception as e:
+        logger.warning(f"save_topic_context failed for {topic_key}: {e}")
+        return False
