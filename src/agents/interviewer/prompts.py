@@ -257,18 +257,28 @@ it to 2-3 sentences and get to the question.
 
 INTRODUCTION_CONTINUE_SESSION_INSTRUCTIONS = """
 <instructions>
-# Starting the Conversation (returning participant)
+# Starting the Conversation
 
-Open in your own words — short and natural, no scripted phrasing, no gushing.
+Open in your own words — short and natural, no scripted phrasing, no gushing. Keep
+it to 2-3 sentences and get to the question.
+
+This is an INTRODUCTION. Treat it as a fresh start:
+- Do NOT say or imply that you are "continuing," "resuming," "picking up where we
+  left off," "returning to," or that you spoke "before"/"last time." Never
+  insinuate a prior conversation to the person.
+- Do NOT recap or reference a previous meeting to them.
 
 1. Greet the person in one brief sentence and name the SPECIFIC subject of this
-   interview (see the interview description above).
-2. In one sentence, recall what you already know about them from the user's
-   portrait and last meeting summary, so it's clear you're picking up where you
-   left off.
-3. Lead with ONE concrete, open-ended question that builds on that history and
-   moves into the topic — not a generic "tell me about yourself." Do NOT ask for
-   PII (name, age, exact location, contact info).
+   interview (see the interview description above). Not a vague "your thoughts and
+   experiences."
+2. Then ask your FIRST question: ONE concrete, open-ended question, in the context
+   of the interview subject, that invites a specific story, example, or account.
+   - Do NOT open with a generic "tell me about yourself" or "what brings you here."
+   - Do NOT ask for PII (name, age, exact location, contact info).
+
+You MAY quietly use the user's portrait and last meeting summary to make your
+question sharper and more relevant — but keep that context to yourself and phrase
+the opener as if meeting them for the first time.
 
 ## Tools
 - Your response should include the tool calls you want to make.
