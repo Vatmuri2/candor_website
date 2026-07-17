@@ -101,21 +101,33 @@ class AgendaManager(BaseAgent, Participant):
                                      approved_context: Optional[str] = None):
         """Seed the session agenda from background context.
 
-        Preference order: the participant-approved researched briefing
-        (approved_context), otherwise a file at additional_context_path.
-        """
-        additional_context = None
+        Two very different inputs are handled here and MUST stay separated:
 
-        # 1) Participant-approved researched context wins.
+        - ``approved_context``: a briefing produced by ContextResearchAgent about
+          the interview *topic*. It's knowledge the interviewer holds; the
+          respondent has said none of it. It goes into ``research_briefing`` and
+          is surfaced in the interviewer prompt — but it must NOT touch subtopic
+          notes/coverage or the user portrait, or the AgendaManager will mark
+          core subtopics covered before the interview starts and ``all_core_
+          topics_completed`` will fire on turn 1.
+
+        - ``additional_context_path``: a file the operator loads with facts
+          about the *respondent* (bio, prior notes). This one legitimately
+          seeds portrait, last-meeting-summary, and subtopic notes.
+        """
+        # (1) Approved topic briefing: park it in research_briefing and stop.
         if approved_context and approved_context.strip():
-            additional_context = approved_context
+            self.interview_session.session_agenda.set_research_briefing(approved_context)
             SessionLogger.log_to_file(
                 "execution_log",
-                f"[CONTEXT_RESEARCH] seeding agenda with approved context "
-                f"({len(additional_context)} chars)."
+                f"[CONTEXT_RESEARCH] stored approved topic briefing "
+                f"({len(approved_context)} chars) as research_briefing — "
+                f"NOT routed into subtopic coverage."
             )
-        # 2) Otherwise fall back to a context file, if one is configured.
-        elif additional_context_path and os.path.exists(additional_context_path):
+            # Fall through so a respondent-focused file can also seed, if one exists.
+
+        additional_context = None
+        if additional_context_path and os.path.exists(additional_context_path):
             if additional_context_path.endswith('.txt') or additional_context_path.endswith('.md'):
                 with open(additional_context_path, 'r', encoding='utf-8') as f:
                     additional_context = f.read()
@@ -175,10 +187,24 @@ class AgendaManager(BaseAgent, Participant):
                 )
 
     async def _process_qa_pair(self, interviewer_message: Message, user_message: Message):
-        """Process a Q&A pair with task tracking"""
+        """Process a Q&A pair with task tracking.
+
+        If the session has already ended (max_turns hit, or the closer wound it
+        down) we short-circuit: the coverage/notes update below will otherwise
+        keep re-scheduling itself against the same Q/A pair and _drain will
+        never return. See findings.md B2.
+        """
+        if not self.interview_session.session_in_progress:
+            SessionLogger.log_to_file(
+                "execution_log",
+                "[AGENDA] Skipping _process_qa_pair after session end."
+            )
+            return
         await self._increment_pending_tasks()
         try:
             await self._locked_write_memory_notes_and_question_bank(interviewer_message, user_message)
+            if not self.interview_session.session_in_progress:
+                return
             await self._locked_update_subtopic_coverage(interviewer_message, user_message)
         finally:
             await self._decrement_pending_tasks()

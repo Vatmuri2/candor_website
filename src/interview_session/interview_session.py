@@ -16,6 +16,8 @@ from src.agents.exploration_planner.exploration_planner import ExplorationPlanne
 from src.agents.engagement.engagement_monitor import EngagementMonitor
 from src.agents.conversation_closer.conversation_closer import ConversationCloser
 from src.agents.context.context_research import ContextResearchAgent, ContextResearchResult
+from src.agents.introduction.introduction_agent import IntroductionAgent
+from src.agents.tracker.interview_tracker import InterviewTracker
 from src.agents.user.user_agent import UserAgent
 from src.content.session_agenda.session_agenda import SessionAgenda
 from src.utils.data_process import save_feedback_to_csv
@@ -236,7 +238,8 @@ class InterviewSession:
             config=monitor_cfg, interview_session=self
         )
         self.conversation_closer = ConversationCloser(
-            topic_name=self._interview_description
+            topic_name=self._interview_description,
+            interview_session=self,
         )
 
         # Context research agent: researches background about the interview topic
@@ -249,6 +252,26 @@ class InterviewSession:
             context_cfg["model_name"] = context_model
         self.context_research_agent = ContextResearchAgent(
             config=context_cfg, interview_session=self
+        )
+        # Introduction agent: composes the very first interviewer turn (greeting +
+        # briefing-aware opening question) and hands the Interviewer a stance note
+        # for turn 2 so the follow-up doesn't retry the same slot.
+        intro_model = os.getenv("INTRODUCTION_MODEL_NAME")
+        intro_cfg = {"user_id": self.user_id}
+        if intro_model:
+            intro_cfg["model_name"] = intro_model
+        self.introduction_agent = IntroductionAgent(
+            config=intro_cfg, interview_session=self
+        )
+        # InterviewTracker: process-aware narrative supervisor. Consulted by the
+        # Interviewer for the "state of the interview" preamble and by the closer
+        # for loose-ends selection.
+        tracker_model = os.getenv("INTERVIEW_TRACKER_MODEL_NAME")
+        tracker_cfg = {"user_id": self.user_id}
+        if tracker_model:
+            tracker_cfg["model_name"] = tracker_model
+        self.interview_tracker = InterviewTracker(
+            config=tracker_cfg, interview_session=self
         )
         # The researched briefing (dict) offered for approval, and the text the
         # participant approved to seed the interview with.
@@ -528,6 +551,8 @@ class InterviewSession:
             "exploration_planner": self.exploration_planner,
             "engagement_monitor": self.engagement_monitor,
             "context_research_agent": self.context_research_agent,
+            "interview_tracker": self.interview_tracker,
+            "introduction_agent": self.introduction_agent,
         }
 
     def to_state(self) -> dict:
@@ -567,11 +592,14 @@ class InterviewSession:
                 "last_offer_turn": closer._last_offer_turn,
                 "close_offers": closer.close_offers,
                 "pivots": closer.pivots,
+                "quality_collapse_ends": closer.quality_collapse_ends,
+                "stance_collapse_streak": closer._stance_collapse_streak,
             },
             "interviewer": {
                 "guardrail_stats": interviewer.guardrail_stats,
                 "pending_directive_note": interviewer._pending_directive_note,
             },
+            "interview_tracker": self.interview_tracker.snapshot(),
         }
 
     def load_state(self, state: dict) -> None:
@@ -604,11 +632,15 @@ class InterviewSession:
         self.conversation_closer._last_offer_turn = clo.get("last_offer_turn", 0)
         self.conversation_closer.close_offers = clo.get("close_offers", 0)
         self.conversation_closer.pivots = clo.get("pivots", 0)
+        self.conversation_closer.quality_collapse_ends = clo.get("quality_collapse_ends", 0)
+        self.conversation_closer._stance_collapse_streak = clo.get("stance_collapse_streak", 0)
 
         itv = state.get("interviewer", {})
         self._interviewer.guardrail_stats = itv.get("guardrail_stats",
                                                      self._interviewer.guardrail_stats)
         self._interviewer._pending_directive_note = itv.get("pending_directive_note", "")
+
+        self.interview_tracker.load_snapshot(state.get("interview_tracker"))
 
     def save_files(self) -> None:
         """Persist the FAISS banks, agenda and strategic state to disk."""

@@ -28,6 +28,11 @@ class SessionAgenda:
         self.strategic_priorities: Dict[str, dict] = data.get("strategic_priorities", {})
         self.emergent_insights: List[dict] = data.get("emergent_insights", [])
 
+        # Background briefing about the topic (from ContextResearchAgent, participant-approved).
+        # This is knowledge the INTERVIEWER has — NOT things the respondent has said. It must
+        # never be routed into subtopic notes or coverage; see AgendaManager.augment_session_agenda.
+        self.research_briefing: str = data.get("research_briefing", "")
+
     @classmethod
     def load_from_file(cls, file_path):
         """Loads a SessionAgenda from a JSON file."""
@@ -260,6 +265,7 @@ class SessionAgenda:
             "interview_topic_manager": self.interview_topic_manager.to_dict(),
             "strategic_priorities": self.strategic_priorities,
             "emergent_insights": self.emergent_insights,
+            "research_briefing": self.research_briefing,
         }
         
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -303,6 +309,13 @@ class SessionAgenda:
         
     def update_last_meeting_summary_str(self, new_last_meeting_summary: str):
         self.last_meeting_summary = new_last_meeting_summary
+
+    def set_research_briefing(self, briefing: str) -> None:
+        """Store the topic briefing produced by ContextResearchAgent."""
+        self.research_briefing = (briefing or "").strip()
+
+    def get_research_briefing_str(self) -> str:
+        return self.research_briefing or ""
     
     def format_qa(self, qa: InterviewQuestion, hide_answered: str = "", indent: int = 2) -> list[str]:
         """Formats a question and its sub-questions recursively in a structured, LLM-friendly way."""

@@ -6,6 +6,7 @@ def get_prompt(prompt_type: str = "normal"):
             "CONTEXT": CONTEXT,
             "USER_PORTRAIT": USER_PORTRAIT,
             "LAST_MEETING_SUMMARY": LAST_MEETING_SUMMARY,
+            "RESEARCH_BRIEFING": RESEARCH_BRIEFING,
             "INSTRUCTIONS": INTRODUCTION_INSTRUCTIONS,
             "OUTPUT_FORMAT": OUTPUT_FORMAT_INTRODUCTION
         })
@@ -14,6 +15,7 @@ def get_prompt(prompt_type: str = "normal"):
             "CONTEXT": CONTEXT,
             "USER_PORTRAIT": USER_PORTRAIT,
             "LAST_MEETING_SUMMARY": LAST_MEETING_SUMMARY,
+            "RESEARCH_BRIEFING": RESEARCH_BRIEFING,
             "INSTRUCTIONS": INTRODUCTION_CONTINUE_SESSION_INSTRUCTIONS,
             "OUTPUT_FORMAT": OUTPUT_FORMAT_INTRODUCTION
         })
@@ -22,6 +24,7 @@ def get_prompt(prompt_type: str = "normal"):
             "CONTEXT": CONTEXT,
             "USER_PORTRAIT": USER_PORTRAIT,
             "LAST_MEETING_SUMMARY": LAST_MEETING_SUMMARY,
+            "RESEARCH_BRIEFING": RESEARCH_BRIEFING,
             "QUESTIONS_AND_NOTES": QUESTIONS_AND_NOTES,
             "CHAT_HISTORY": CHAT_HISTORY,
             "STRATEGIC_QUESTIONS": STRATEGIC_QUESTIONS,
@@ -63,6 +66,8 @@ INTERVIEW_PROMPT = """
 
 {LAST_MEETING_SUMMARY}
 
+{RESEARCH_BRIEFING}
+
 {CHAT_HISTORY}
 
 {QUESTIONS_AND_NOTES}
@@ -83,6 +88,8 @@ INTRODUCTION_PROMPT = """
 
 {LAST_MEETING_SUMMARY}
 
+{RESEARCH_BRIEFING}
+
 {INSTRUCTIONS}
 
 {OUTPUT_FORMAT}
@@ -94,6 +101,8 @@ INTRODUCTION_CONTINUE_SESSION_PROMPT = """
 {USER_PORTRAIT}
 
 {LAST_MEETING_SUMMARY}
+
+{RESEARCH_BRIEFING}
 
 {INSTRUCTIONS}
 
@@ -151,6 +160,24 @@ Here is a summary of the last interview session with the user, don't repeat ques
 <last_meeting_summary>
 {last_meeting_summary}
 </last_meeting_summary>
+"""
+
+RESEARCH_BRIEFING = """
+<research_briefing>
+This is background YOU (the interviewer) hold about the topic — pulled from web
+research before the interview. The RESPONDENT HAS NOT SAID ANY OF THIS. Never
+attribute it to them. Never present it as if they told you.
+
+Use it to:
+- ground your questions in real current facts / dates / competing perspectives,
+- pick sharper opening angles than generic "tell me about your experience,"
+- notice when the respondent's account contradicts, complicates, or personalizes
+  what public sources say — and probe there.
+
+If the briefing is empty or absent, ignore this block and rely on general knowledge.
+
+{research_briefing}
+</research_briefing>
 """
 
 CHAT_HISTORY = """

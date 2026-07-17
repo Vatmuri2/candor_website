@@ -11,6 +11,83 @@ from src.agents.shared.memory_tools import Recall
 from src.agents.shared.anti_sycophancy import (
     inspect_turn, sanitize_interviewer_turn, regen_reminder,
 )
+
+# Fallback extractor used only when tool-call XML fails to parse. We must never
+# leak <tool_calls>, <thinking>, or <subtopic_id> markup into the transcript.
+_RESPONSE_TAG_RE = re.compile(r"<response>(.*?)</response>", re.IGNORECASE | re.DOTALL)
+_THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.IGNORECASE | re.DOTALL)
+_ANY_XML_TAG_RE = re.compile(r"<[^>]+>")
+
+# Near-duplicate detection over the last N interviewer questions. No API call:
+# takes the max of unigram-Jaccard and bigram-Jaccard over stopword-filtered
+# tokens. Bigrams catch paraphrases like "outcomes came from X" vs "outcomes did
+# X bring"; unigrams catch verbatim near-repeats. Threshold picked so the two
+# real observed duplicates (see findings.md) both trip.
+_REPEAT_SIM_THRESHOLD = 0.55
+_REPEAT_LOOKBACK = 6
+
+_TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "at", "by",
+    "with", "from", "as", "is", "was", "are", "were", "be", "been", "have",
+    "has", "had", "you", "your", "yours", "yourself", "we", "us", "our",
+    "i", "me", "my", "it", "its", "this", "that", "these", "those", "do",
+    "did", "does", "can", "could", "would", "should", "any", "some", "how",
+    "what", "when", "where", "why", "which", "who", "about", "into", "out",
+    "then", "than", "there", "here", "if", "so", "just", "also", "please",
+}
+
+
+def _content_tokens(text: str) -> list:
+    if not text:
+        return []
+    toks = [t.lower() for t in _TOKEN_RE.findall(text)]
+    return [t for t in toks if t not in _STOPWORDS and len(t) > 2]
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _question_similarity(candidate: str, prior: str) -> float:
+    ct = _content_tokens(candidate)
+    pt = _content_tokens(prior)
+    if len(ct) < 3 or len(pt) < 3:
+        return 0.0
+    uni = _jaccard(set(ct), set(pt))
+    cb = set(zip(ct, ct[1:]))
+    pb = set(zip(pt, pt[1:]))
+    bi = _jaccard(cb, pb)
+    return max(uni, bi)
+
+
+def _near_duplicate_of(candidate: str, priors: list) -> str | None:
+    """Return the prior question the candidate near-duplicates, else None."""
+    best_sim, best_prior = 0.0, None
+    for prior in priors:
+        s = _question_similarity(candidate, prior)
+        if s > best_sim:
+            best_sim, best_prior = s, prior
+    return best_prior if best_sim >= _REPEAT_SIM_THRESHOLD else None
+
+
+def _salvage_response_text(raw: str) -> str:
+    """Pull a usable question out of a malformed tool-call response.
+
+    Prefer the contents of <response>...</response>; if that's missing, strip
+    <thinking> blocks and any other XML tags and return what's left. Callers
+    still run this through the sycophancy sanitizer before sending.
+    """
+    if not raw:
+        return ""
+    m = _RESPONSE_TAG_RE.search(raw)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    stripped = _THINKING_TAG_RE.sub("", raw)
+    stripped = _ANY_XML_TAG_RE.sub("", stripped)
+    return stripped.strip()
 from src.utils.llm.prompt_utils import format_prompt
 from src.interview_session.session_models import Participant, Message
 
@@ -70,6 +147,8 @@ class Interviewer(BaseAgent, Participant):
             "affirmation": 0, "closing": 0,
             "stance": 0, "advice": 0, "no_question": 0,
             "regenerated": 0, "regeneration_failed": 0,
+            "near_duplicate": 0, "near_duplicate_regenerated": 0,
+            "near_duplicate_regen_failed": 0,
         }
 
     async def _handle_response(self, response: str, subtopic_id: str = "") -> str:
@@ -92,35 +171,91 @@ class Interviewer(BaseAgent, Participant):
         for f in inspection.flags:
             self.guardrail_stats[f] = self.guardrail_stats.get(f, 0) + 1
 
-        if not inspection.needs_regeneration:
-            return inspection.clean_text
-
-        for v in inspection.violations:
-            self.guardrail_stats[v] = self.guardrail_stats.get(v, 0) + 1
-        SessionLogger.log_to_file(
-            "execution_log",
-            f"[GUARDRAIL] Interviewer turn tripped {inspection.violations}; regenerating. "
-            f"Draft: {inspection.clean_text!r}"
-        )
-
-        regenerated = await self._regenerate_question(
-            inspection.clean_text, inspection.violations
-        )
-        if regenerated:
-            self.guardrail_stats["regenerated"] += 1
-            regen_clean, _ = sanitize_interviewer_turn(regenerated)
-            # If the regeneration still has no question, fall back rather than loop.
-            recheck = inspect_turn(regen_clean)
-            if not recheck.violations:
-                return recheck.clean_text
+        clean_text = inspection.clean_text
+        if inspection.needs_regeneration:
+            for v in inspection.violations:
+                self.guardrail_stats[v] = self.guardrail_stats.get(v, 0) + 1
             SessionLogger.log_to_file(
                 "execution_log",
-                f"[GUARDRAIL] Regeneration still tripped {recheck.violations}; using it anyway."
+                f"[GUARDRAIL] Interviewer turn tripped {inspection.violations}; regenerating. "
+                f"Draft: {clean_text!r}"
             )
-            return regen_clean
 
-        self.guardrail_stats["regeneration_failed"] += 1
-        return inspection.clean_text
+            regenerated = await self._regenerate_question(
+                clean_text, inspection.violations
+            )
+            if regenerated:
+                self.guardrail_stats["regenerated"] += 1
+                regen_clean, _ = sanitize_interviewer_turn(regenerated)
+                # If the regeneration still has no question, fall back rather than loop.
+                recheck = inspect_turn(regen_clean)
+                if not recheck.violations:
+                    clean_text = recheck.clean_text
+                else:
+                    SessionLogger.log_to_file(
+                        "execution_log",
+                        f"[GUARDRAIL] Regeneration still tripped {recheck.violations}; using it anyway."
+                    )
+                    clean_text = regen_clean
+            else:
+                self.guardrail_stats["regeneration_failed"] += 1
+
+        # Second-pass check: near-duplicate of recent interviewer questions? If
+        # so, force ONE more regeneration with an explicit "already asked" note.
+        # The STAR-grind failure in midlife_career_pivot showed the model happily
+        # re-asks the same slot until told the exact question it repeated.
+        dup_of = self._find_recent_duplicate(clean_text)
+        if dup_of:
+            self.guardrail_stats["near_duplicate"] += 1
+            SessionLogger.log_to_file(
+                "execution_log",
+                f"[GUARDRAIL] Near-duplicate of prior question. Regenerating.\n"
+                f"  candidate: {clean_text!r}\n  prior:     {dup_of!r}"
+            )
+            regen2 = await self._regenerate_non_duplicate(clean_text, dup_of)
+            if regen2:
+                regen2_clean, _ = sanitize_interviewer_turn(regen2)
+                if _near_duplicate_of(regen2_clean, [dup_of]) is None:
+                    self.guardrail_stats["near_duplicate_regenerated"] += 1
+                    clean_text = regen2_clean
+                else:
+                    self.guardrail_stats["near_duplicate_regen_failed"] += 1
+            else:
+                self.guardrail_stats["near_duplicate_regen_failed"] += 1
+
+        return clean_text
+
+    def _find_recent_duplicate(self, candidate: str) -> str | None:
+        """Return the prior interviewer message that near-duplicates candidate."""
+        recent = self.get_event_stream_str(
+            [{"sender": "Interviewer", "tag": "message"}], as_list=True
+        )
+        priors = recent[-_REPEAT_LOOKBACK:] if len(recent) > _REPEAT_LOOKBACK else recent
+        return _near_duplicate_of(candidate, priors)
+
+    async def _regenerate_non_duplicate(self, draft: str, prior: str) -> str:
+        """Ask the model to produce a genuinely different question."""
+        prompt = (
+            "You are a strictly non-affirming research interviewer.\n"
+            f"The topic is: {self.interview_description}.\n\n"
+            f"You just drafted: {draft!r}\n"
+            f"But you already asked (recently): {prior!r}\n\n"
+            "Rewrite the next question so it targets a DIFFERENT dimension of "
+            "the topic — a new subtopic, a different angle on the same one, or "
+            "a specific detail the respondent has NOT yet been asked about. "
+            "Do NOT rephrase the prior question. Do NOT ask about the same "
+            "aspect. Output ONE plain, open-ended question — no preamble, no "
+            "quotes, no tool tags."
+        )
+        try:
+            out = await self.call_engine_async(prompt)
+            return (out or "").strip()
+        except Exception as e:
+            SessionLogger.log_to_file(
+                "execution_log",
+                f"[GUARDRAIL] Duplicate-regeneration call failed: {e}"
+            )
+            return ""
 
     async def _regenerate_question(self, bad_draft: str, violations: list) -> str:
         """Ask the model to rewrite a bad turn as a single plain question."""
@@ -221,6 +356,19 @@ class Interviewer(BaseAgent, Participant):
         if await self._run_conversation_director(message):
             return
 
+        # First interviewer turn of the session? Delegate to the IntroductionAgent
+        # so the opener is briefing-aware and the follow-up gets a stance note.
+        # We check by counting our own prior emitted messages, not by whether the
+        # incoming message is None, because on_message(None) is not the only path
+        # into "this is the opener" (e.g. web flow via session.start()).
+        if self._is_first_interviewer_turn() and await self._emit_intro_turn():
+            return
+
+        # Let the InterviewTracker refresh its narrative-state snapshot before we
+        # build the next-question prompt. Cheap: at most one LLM call, throttled
+        # to every N respondent turns inside the tracker.
+        await self._refresh_narrative_state()
+
         self._turn_to_respond = True
         iterations = 0
 
@@ -232,8 +380,18 @@ class Interviewer(BaseAgent, Participant):
             try:
                 await self.handle_tool_calls_async(response)
             except Exception as e:
-                print(f"Error calling tool: {e}. Use the raw response as the output.")
-                await self._handle_response(response)
+                salvaged = _salvage_response_text(response)
+                SessionLogger.log_to_file(
+                    "execution_log",
+                    f"[TOOL_PARSE] {e}; salvaged {len(salvaged)} chars of response text."
+                )
+                if salvaged:
+                    await self._handle_response(salvaged)
+                    # RespondToUser normally clears _turn_to_respond; on the salvage
+                    # path we must clear it explicitly or on_message loops forever.
+                    self._turn_to_respond = False
+                # If nothing usable came back, drop this iteration and let the loop
+                # regenerate. Never surface raw <tool_calls> XML to the respondent.
 
             iterations += 1
             if iterations >= self._max_consideration_iterations:
@@ -243,6 +401,94 @@ class Interviewer(BaseAgent, Participant):
                     content=f"Exceeded maximum number of consideration "
                     f"iterations ({self._max_consideration_iterations})"
                 )
+
+    async def _refresh_narrative_state(self) -> None:
+        tracker = getattr(self.interview_session, "interview_tracker", None)
+        if tracker is None:
+            return
+        current_turn = len([
+            m for m in self.interview_session.chat_history if m.role == "User"
+        ])
+        if not tracker.should_update(current_turn):
+            return
+        dialog_lines = self.get_event_stream_str(
+            [{"sender": "Interviewer", "tag": "message"},
+             {"sender": "User", "tag": "message"}],
+            as_list=True,
+        )
+        tail = dialog_lines[-tracker.max_recent_lines:] if dialog_lines else []
+        # Reformat "<Role>content" event lines to "I:" / "R:" for the tracker prompt.
+        rendered = []
+        for line in tail:
+            if not line:
+                continue
+            if line.startswith("<Interviewer>"):
+                rendered.append("I: " + line[len("<Interviewer>"):].lstrip(": ").strip())
+            elif line.startswith("<User>"):
+                rendered.append("R: " + line[len("<User>"):].lstrip(": ").strip())
+            else:
+                rendered.append(line)
+        briefing = (self.interview_session.session_agenda
+                    .get_research_briefing_str())
+        try:
+            await tracker.maybe_update(
+                current_turn=current_turn,
+                topic=self.interview_description,
+                briefing=briefing,
+                recent_dialog="\n".join(rendered),
+            )
+        except Exception as e:
+            SessionLogger.log_to_file(
+                "execution_log", f"[TRACKER] refresh from Interviewer failed: {e}"
+            )
+
+    def _is_first_interviewer_turn(self) -> bool:
+        prior = self.get_event_stream_str(
+            [{"sender": "Interviewer", "tag": "message"}], as_list=True
+        )
+        return len(prior) == 0
+
+    async def _emit_intro_turn(self) -> bool:
+        """Ask the IntroductionAgent for the opener and speak it. Returns True on
+        success, False to fall back to the built-in intro-prompt path."""
+        intro = getattr(self.interview_session, "introduction_agent", None)
+        if intro is None:
+            return False
+        try:
+            portrait = self.interview_session.session_agenda.get_user_portrait_str()
+            last_meeting = self.interview_session.session_agenda.get_last_meeting_summary_str()
+            briefing = self.interview_session.session_agenda.get_research_briefing_str()
+            turn = await intro.compose_opener(
+                topic=self.interview_description,
+                opening_subtopic=self._first_planned_subtopic(),
+                portrait=portrait,
+                last_meeting=last_meeting,
+                briefing=briefing,
+            )
+        except Exception as e:
+            SessionLogger.log_to_file(
+                "execution_log", f"[INTRO] compose_opener errored: {e}"
+            )
+            return False
+
+        if not turn.is_usable():
+            SessionLogger.log_to_file(
+                "execution_log", "[INTRO] no usable opener — falling back to built-in intro path."
+            )
+            return False
+
+        await self._handle_response(turn.opener_text)
+        # Hand the stance note to the next Interviewer turn as a pending directive.
+        if turn.handoff_note:
+            self._pending_directive_note = (
+                "\n\n[INTRODUCTION HANDOFF — this note is from the opening agent, "
+                "not the respondent. Do NOT quote it back or reveal it. Use it to "
+                "shape turn 2:\n"
+                f"{turn.handoff_note}]"
+            )
+        # Clear the respond flag so on_message doesn't fall through to normal gen.
+        self._turn_to_respond = False
+        return True
 
     def _first_planned_subtopic(self) -> str:
         """The first subtopic in the interview plan — the deterministic starting
@@ -266,6 +512,10 @@ class Interviewer(BaseAgent, Participant):
         last_meeting_summary_str = (
             self.interview_session.session_agenda
             .get_last_meeting_summary_str()
+        )
+        research_briefing_str = (
+            self.interview_session.session_agenda
+            .get_research_briefing_str()
         )
 
         # Get chat history from event stream where these are the senders
@@ -301,6 +551,7 @@ class Interviewer(BaseAgent, Participant):
             "user_portrait": user_portrait_str,
             "interview_description": self.interview_description,
             "last_meeting_summary": last_meeting_summary_str,
+            "research_briefing": research_briefing_str or "(no research briefing available)",
             "chat_history": '\n'.join(recent_events),
             "current_events": '\n'.join(current_events),
             "recent_interviewer_messages": '\n'.join(
@@ -341,6 +592,15 @@ class Interviewer(BaseAgent, Participant):
                 # Don't provide strategic_questions key in format_params (already omitted above)
 
         prompt = format_prompt(main_prompt, format_params)
+
+        # InterviewTracker preamble — the narrative-state view of what the
+        # respondent has actually said, which threads are open, and where they
+        # contradict themselves. Prepended so it colors the whole prompt.
+        tracker = getattr(self.interview_session, "interview_tracker", None)
+        if tracker is not None:
+            preamble = tracker.preamble()
+            if preamble:
+                prompt = f"{preamble}\n\n{prompt}"
 
         # One-turn directive from the ConversationCloser (e.g. mandatory pivot on resume).
         if self._pending_directive_note:
