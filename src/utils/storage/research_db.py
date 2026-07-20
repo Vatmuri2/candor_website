@@ -29,8 +29,15 @@ _schema_ready = False
 
 
 def _database_url() -> Optional[str]:
+    # Vercel prefixes these with the storage resource's name when a Postgres
+    # integration isn't the project's default one (e.g. "DATA_STORAGE_POSTGRES_URL"
+    # instead of "POSTGRES_URL") — check the plain names first, then that prefix.
     url = (os.getenv("POSTGRES_URL") or os.getenv("POSTGRES_PRISMA_URL")
-           or os.getenv("DATABASE_URL") or "").strip()
+           or os.getenv("DATABASE_URL")
+           or os.getenv("DATA_STORAGE_POSTGRES_URL")
+           or os.getenv("DATA_STORAGE_POSTGRES_PRISMA_URL")
+           or os.getenv("DATA_STORAGE_DATABASE_URL")
+           or "").strip()
     if not url:
         return None
     # SQLAlchemy needs the postgresql(+driver) scheme, not the bare "postgres://".

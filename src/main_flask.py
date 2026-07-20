@@ -666,6 +666,9 @@ def survey_submit():
 def admin_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        if not ADMIN_PASSWORD:
+            # TEMP: no ADMIN_PASSWORD set -> admin area open to anyone with the URL.
+            return fn(*args, **kwargs)
         if not flask_session.get('is_admin'):
             return redirect(url_for('admin_login'))
         return fn(*args, **kwargs)
@@ -675,7 +678,7 @@ def admin_required(fn):
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     if not ADMIN_PASSWORD:
-        return "Admin area is not configured (set ADMIN_PASSWORD).", 503
+        return redirect(url_for('admin_home'))
     error = None
     if request.method == 'POST':
         if request.form.get('password') == ADMIN_PASSWORD:
