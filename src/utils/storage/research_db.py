@@ -132,6 +132,18 @@ _DDL = [
         updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+    # Admin-authored interviews shared via a link (see main_flask.py /i/<token>).
+    # `questions` is the flat list the admin typed; the topics.json-shaped plan is
+    # derived from it and re-materialized to a temp file on each request, since
+    # the filesystem isn't durable/writable across serverless invocations.
+    """
+    CREATE TABLE IF NOT EXISTS custom_interviews (
+        token       TEXT PRIMARY KEY,
+        title       TEXT NOT NULL,
+        questions   JSONB NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
 ]
 
 
@@ -448,3 +460,66 @@ def save_topic_context(topic_key: str, topic: str, context: dict,
     except Exception as e:
         logger.warning(f"save_topic_context failed for {topic_key}: {e}")
         return False
+
+
+# ---- admin-authored interviews shared via a link ----
+
+def save_custom_interview(token: str, title: str, questions: list) -> bool:
+    """Store a new admin-authored interview. Returns True on success."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return False
+    try:
+        from sqlalchemy import text
+        stmt = text("""
+            INSERT INTO custom_interviews (token, title, questions)
+            VALUES (:token, :title, CAST(:questions AS JSONB))
+            ON CONFLICT (token) DO NOTHING
+        """)
+        with engine.begin() as conn:
+            conn.execute(stmt, {"token": token, "title": title,
+                                "questions": json.dumps(questions)})
+        return True
+    except Exception as e:
+        logger.warning(f"save_custom_interview failed for {token}: {e}")
+        return False
+
+
+def get_custom_interview(token: str) -> Optional[dict]:
+    """Return {"title": ..., "questions": [...], "created_at": ...} or None."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return None
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT title, questions, created_at FROM custom_interviews "
+                     "WHERE token = :t"),
+                {"t": token},
+            ).fetchone()
+        if row is None:
+            return None
+        return {"title": row[0], "questions": row[1], "created_at": row[2]}
+    except Exception as e:
+        logger.warning(f"get_custom_interview failed for {token}: {e}")
+        return None
+
+
+def list_custom_interviews() -> List[dict]:
+    """Return all admin-authored interviews, newest first."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return []
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text("SELECT token, title, questions, created_at FROM "
+                     "custom_interviews ORDER BY created_at DESC")
+            ).fetchall()
+        return [{"token": r[0], "title": r[1], "questions": r[2], "created_at": r[3]}
+                for r in rows]
+    except Exception as e:
+        logger.warning(f"list_custom_interviews failed: {e}")
+        return []

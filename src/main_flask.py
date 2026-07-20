@@ -110,7 +110,14 @@ DEFAULT_CONVERSATION_TYPE = "ai_workforce"
 _REGISTRY_PATH = os.path.join('data', 'configs', '_custom_interviews.json')
 
 
+def _registry_use_db() -> bool:
+    return research_db.is_configured()
+
+
 def _load_registry() -> dict:
+    """Local-disk fallback registry, used only when no Postgres is configured
+    (e.g. running on your laptop). On Vercel research_db is always used instead —
+    the filesystem there is read-only/ephemeral, see _materialize_custom_plan."""
     if os.path.exists(_REGISTRY_PATH):
         try:
             with open(_REGISTRY_PATH, 'r', encoding='utf-8') as f:
@@ -127,31 +134,57 @@ def _save_registry(registry: dict) -> None:
 
 
 def create_custom_interview(title: str, questions: list) -> str:
-    """Save an admin-authored question list as a plan file + registry entry.
+    """Save an admin-authored question list. Returns the share token.
 
-    Returns the share token. `questions` becomes the subtopics of a single
-    topic named after `title` — the same shape InterviewTopicManager already
-    parses (see data/configs/topics.json).
+    `questions` becomes the subtopics of a single topic named after `title` —
+    the same shape InterviewTopicManager already parses (see
+    data/configs/topics.json). Persisted to Postgres when configured (required
+    for this to survive on Vercel's read-only/ephemeral filesystem); otherwise
+    to a local JSON file for laptop use.
     """
     token = uuid.uuid4().hex[:10]
-    plan_file = f"custom_{token}.json"
-    plan = [{"topic": title, "subtopics": questions}]
-    plan_path = os.path.join('data', 'configs', plan_file)
-    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
-    with open(plan_path, 'w', encoding='utf-8') as f:
-        json.dump(plan, f, indent=2)
-
-    registry = _load_registry()
-    registry[token] = {
-        "title": title, "plan_file": plan_file,
-        "created_at": time.time(), "questions": questions,
-    }
-    _save_registry(registry)
+    if _registry_use_db():
+        research_db.save_custom_interview(token, title, questions)
+    else:
+        registry = _load_registry()
+        registry[token] = {"title": title, "questions": questions,
+                           "created_at": time.time()}
+        _save_registry(registry)
     return token
 
 
 def get_custom_interview(token: str) -> Optional[dict]:
+    if _registry_use_db():
+        return research_db.get_custom_interview(token)
     return _load_registry().get(token)
+
+
+def list_custom_interviews() -> list:
+    if _registry_use_db():
+        return research_db.list_custom_interviews()
+    registry = _load_registry()
+    interviews = [{"token": t, **v} for t, v in registry.items()]
+    interviews.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return interviews
+
+
+def _materialize_custom_plan(link_token: str, plan_path: str) -> bool:
+    """(Re)write the topics.json-shaped plan file for a link-based interview.
+
+    Called on EVERY session build (not just creation) because the source of
+    truth is the registry (Postgres or local JSON), and the plan file itself is
+    working state — on Vercel it lives under DATA_DIR (/tmp), which does not
+    persist across serverless invocations. Cheap (one lookup + one file write),
+    so re-materializing every turn is fine.
+    """
+    entry = get_custom_interview(link_token)
+    if entry is None:
+        return False
+    plan = [{"topic": entry["title"], "subtopics": entry["questions"]}]
+    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
+    with open(plan_path, 'w', encoding='utf-8') as f:
+        json.dump(plan, f, indent=2)
+    return True
 
 
 def resolve_conversation(conversation_type, custom_description=None, link_token=None):
@@ -159,7 +192,8 @@ def resolve_conversation(conversation_type, custom_description=None, link_token=
     if conversation_type == 'link' and link_token:
         entry = get_custom_interview(link_token)
         if entry:
-            return entry["title"], _config_path(entry["plan_file"])
+            plan_path = _config_path(f"custom_{link_token}.json")
+            return entry["title"], plan_path
         # Fall through to default if the token is unknown/stale.
     preset = CONVERSATION_TYPES.get(conversation_type or DEFAULT_CONVERSATION_TYPE,
                                     CONVERSATION_TYPES[DEFAULT_CONVERSATION_TYPE])
@@ -198,11 +232,19 @@ def session_meta(user_id, conversation_type, custom_description, link_token=None
         "custom_description": custom_description,
         "interview_description": description,
         "interview_plan_path": plan_path,
+        "link_token": link_token,
     }
 
 
 def build_session(meta: dict) -> InterviewSession:
-    """Construct a fresh InterviewSession from stored meta."""
+    """Construct a fresh InterviewSession from stored meta.
+
+    Called on EVERY turn (see session_store.load), not just at creation — so for
+    a link-based interview we must re-materialize the plan file here every time,
+    not just once. See _materialize_custom_plan.
+    """
+    if meta.get("link_token"):
+        _materialize_custom_plan(meta["link_token"], meta["interview_plan_path"])
     return InterviewSession(
         interaction_mode='api',
         user_config={"user_id": meta["user_id"], "enable_voice": False, "restart": False},
@@ -671,11 +713,7 @@ def admin_interviews():
             token = create_custom_interview(title, questions)
             new_link = url_for('interview_link', token=token, _external=True)
 
-    registry = _load_registry()
-    interviews = sorted(
-        ({"token": t, **v} for t, v in registry.items()),
-        key=lambda x: x.get("created_at", 0), reverse=True,
-    )
+    interviews = list_custom_interviews()
     for it in interviews:
         it["link"] = url_for('interview_link', token=it["token"], _external=True)
 
