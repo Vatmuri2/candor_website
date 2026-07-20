@@ -207,7 +207,12 @@ def resolve_conversation(conversation_type, custom_description=None, link_token=
     if conversation_type == 'link' and link_token:
         entry = get_custom_interview(link_token)
         if entry:
-            plan_path = _config_path(f"custom_{link_token}.json")
+            # Must be written per-session (see _materialize_custom_plan), so this
+            # has to live under DATA_DIR like session_store/context_store do —
+            # _config_path's fallback for a not-yet-written file resolves to the
+            # read-only deployment bundle on Vercel.
+            plan_path = os.path.join(os.getenv('DATA_DIR', 'data'), 'configs',
+                                     f"custom_{link_token}.json")
             return entry["title"], plan_path
         # Fall through to default if the token is unknown/stale.
     preset = CONVERSATION_TYPES.get(conversation_type or DEFAULT_CONVERSATION_TYPE,
