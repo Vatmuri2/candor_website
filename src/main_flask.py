@@ -133,16 +133,19 @@ def _save_registry(registry: dict) -> None:
         json.dump(registry, f, indent=2)
 
 
-def create_custom_interview(title: str, questions: list) -> str:
-    """Save an admin-authored question list. Returns the share token.
+def create_custom_interview(title: str, opening_question: str) -> str:
+    """Save an admin-authored topic + opening question. Returns the share token.
 
-    `questions` becomes the subtopics of a single topic named after `title` —
-    the same shape InterviewTopicManager already parses (see
-    data/configs/topics.json). Persisted to Postgres when configured (required
-    for this to survive on Vercel's read-only/ephemeral filesystem); otherwise
-    to a local JSON file for laptop use.
+    Stored as a 1-element list in the `questions` column so the existing
+    schema/storage helpers don't need to change; `_materialize_custom_plan`
+    uses that single string as the deterministic opener while the rest of the
+    plan comes from the generic topic-agnostic scaffold (topics_general.json)
+    — the same one the participant-facing "Custom Topic" preset uses — so the
+    agenda/exploration agents probe live from there instead of the admin
+    having to write out every question.
     """
     token = uuid.uuid4().hex[:10]
+    questions = [opening_question]
     if _registry_use_db():
         research_db.save_custom_interview(token, title, questions)
     else:
@@ -171,6 +174,14 @@ def list_custom_interviews() -> list:
 def _materialize_custom_plan(link_token: str, plan_path: str) -> bool:
     """(Re)write the topics.json-shaped plan file for a link-based interview.
 
+    The plan is the same generic, topic-agnostic scaffold used by the
+    participant-facing "Custom Topic" preset (topics_general.json) — its
+    subtopics apply to any subject and drive the agenda/exploration agents'
+    live probing. The only admin input baked in is the opening question,
+    which overwrites the scaffold's first subtopic so it's what the
+    interviewer deterministically opens on (see
+    Interviewer._first_planned_subtopic).
+
     Called on EVERY session build (not just creation) because the source of
     truth is the registry (Postgres or local JSON), and the plan file itself is
     working state — on Vercel it lives under DATA_DIR (/tmp), which does not
@@ -180,7 +191,11 @@ def _materialize_custom_plan(link_token: str, plan_path: str) -> bool:
     entry = get_custom_interview(link_token)
     if entry is None:
         return False
-    plan = [{"topic": entry["title"], "subtopics": entry["questions"]}]
+    opening_question = (entry.get("questions") or [""])[0]
+    with open(_config_path("topics_general.json"), 'r', encoding='utf-8') as f:
+        plan = json.load(f)
+    if plan and plan[0].get("subtopics"):
+        plan[0]["subtopics"][0] = opening_question
     os.makedirs(os.path.dirname(plan_path), exist_ok=True)
     with open(plan_path, 'w', encoding='utf-8') as f:
         json.dump(plan, f, indent=2)
@@ -708,12 +723,11 @@ def admin_interviews():
     new_link = None
     if request.method == 'POST':
         title = (request.form.get('title') or '').strip()
-        raw_questions = request.form.get('questions') or ''
-        questions = [q.strip() for q in raw_questions.splitlines() if q.strip()]
-        if not title or not questions:
-            error = "Give the interview a title and at least one question."
+        opening_question = (request.form.get('opening_question') or '').strip()
+        if not title or not opening_question:
+            error = "Give the interview a topic and an opening question."
         else:
-            token = create_custom_interview(title, questions)
+            token = create_custom_interview(title, opening_question)
             new_link = url_for('interview_link', token=token, _external=True)
 
     interviews = list_custom_interviews()
