@@ -159,13 +159,29 @@ class ConversationCloser:
         # We asked "continue or wrap up?" last turn; interpret the reply.
         if self.state == self.AWAITING_CLOSE_REPLY:
             intent = _parse_continue_intent(user_answer)
-            if _VOLUNTEERED_STOP.search(user_answer or "") or intent == "stop":
+            # Only a CLEAR continue signal resumes the interview. An explicit
+            # stop OR an ambiguous/non-committal reply ("hard to say", "not
+            # really", "meh") both wind down. Previously "unclear" fell through
+            # to the resume branch alongside "continue" — a persistently dry,
+            # non-committal respondent (who by construction rarely gives a
+            # clean "yes let's keep going") could get re-offered the same
+            # question turn after turn without the intent ever registering as
+            # "stop," looping indefinitely instead of ever reaching
+            # WINDING_DOWN/ENDED. Confirmed live: a scripted dry/reluctant
+            # session cycled through 3 close-offers (2 mild_breakdown, 1
+            # disengagement_streak), each ambiguous reply silently treated as
+            # "continue," and only ended because the separate severe-breakdown
+            # LLM gate happened to fire at turn 10 — the offer/reply loop
+            # itself never converged. If the respondent doesn't clearly say
+            # they want to continue, the safer assumption is they don't.
+            if _VOLUNTEERED_STOP.search(user_answer or "") or intent != "continue":
                 self.state = self.WINDING_DOWN
                 final_line = await self._compose_final_question(user_answer, transcript_tail, tracker) \
                              or self._natural_final()
                 return Directive(action="scripted_wind_down", text=final_line,
-                                 end_after_answer=True, reason="declined_offer")
-            # continue or unclear -> resume with a mandatory pivot to a fresh dimension
+                                 end_after_answer=True,
+                                 reason="declined_offer" if intent == "stop" else "ambiguous_offer_reply")
+            # Clear continue signal -> resume with a mandatory pivot to a fresh dimension.
             self.state = self.ACTIVE
             self.pivots += 1
             return Directive(action="normal", resume_note=self._resume_note(tracker),
