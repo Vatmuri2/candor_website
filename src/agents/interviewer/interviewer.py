@@ -77,6 +77,52 @@ def _near_duplicate_of(candidate: str, priors: list) -> str | None:
     return best_prior if best_sim >= _REPEAT_SIM_THRESHOLD else None
 
 
+# Deterministic (regex, no LLM judgment) detection of the sentence-opening
+# construction a turn uses. Catches the "You mentioned X, walk me through Y"
+# pattern repeating verbatim-in-shape across turns even when X/Y differ each
+# time and the near-duplicate Jaccard check (which compares CONTENT tokens)
+# sees no overlap at all. Order matters: more specific patterns first.
+_LEADIN_PATTERNS = [
+    ("you_mentioned", re.compile(
+        r"^(you\s+(mentioned|said|brought up|talked about|noted|described))\b", re.I)),
+    ("when_you_say", re.compile(r"^(when you say)\b", re.I)),
+    ("walk_me_through", re.compile(r"^(walk me through)\b", re.I)),
+    ("can_you", re.compile(r"^(can you)\b", re.I)),
+    ("could_you", re.compile(r"^(could you)\b", re.I)),
+    ("tell_me", re.compile(r"^(tell me)\b", re.I)),
+]
+
+# Splits "You mentioned X. Walk me through Y" into a lead-in clause and the
+# actual question, so the mechanical fallback can drop the lead-in and keep
+# just the question if the model fails to vary its phrasing after one retry.
+_LEADIN_SPLIT_RE = re.compile(
+    r"^you\s+(?:mentioned|said|brought up|talked about|noted|described)\b[^.?!]*[.?!]\s*",
+    re.I,
+)
+
+
+def _leadin_label(text: str) -> str | None:
+    """Return a label for the construction `text` opens with, or None."""
+    t = (text or "").strip()
+    for label, pattern in _LEADIN_PATTERNS:
+        if pattern.match(t):
+            return label
+    return None
+
+
+def _strip_leadin_clause(text: str) -> str:
+    """Deterministically drop a 'You mentioned X.' lead-in, keeping the question.
+
+    Used only as the last-resort fallback when a forced regeneration still
+    repeats the same construction — guarantees variety without depending on
+    the model to comply a second time.
+    """
+    stripped = _LEADIN_SPLIT_RE.sub("", text.strip())
+    if not stripped:
+        return text
+    return stripped[0].upper() + stripped[1:]
+
+
 
 def _salvage_response_text(raw: str) -> str:
     """Pull a usable question out of a malformed tool-call response.
@@ -158,6 +204,12 @@ class Interviewer(BaseAgent, Participant):
         # the model relabels its follow-up under a different (valid) subtopic_id
         # while still narratively re-treading the same incident/story.
         self._streak_question_texts: list = []
+        # Code-detected (regex, not model-self-reported) construction label of
+        # the last turn actually sent, e.g. "you_mentioned". Lets us block the
+        # SAME lead-in construction repeating turn-to-turn even when the near-
+        # duplicate check (content-token overlap) sees these as unrelated,
+        # since a different noun each time still yields near-zero token overlap.
+        self._last_leadin_label: str | None = None
         # Counts of how often each guardrail fired, saved with the session.
         self.guardrail_stats = {
             "affirmation": 0, "closing": 0, "midsentence_service": 0,
@@ -167,6 +219,8 @@ class Interviewer(BaseAgent, Participant):
             "near_duplicate_regen_failed": 0,
             "depth_cap_triggered": 0, "depth_cap_regenerated": 0,
             "depth_cap_regen_failed": 0,
+            "repeated_leadin": 0, "repeated_leadin_regenerated": 0,
+            "repeated_leadin_stripped": 0,
         }
 
     async def _handle_response(self, response: str, subtopic_id: str = "") -> str:
@@ -195,6 +249,7 @@ class Interviewer(BaseAgent, Participant):
             self._same_subtopic_streak = 1 if sid else 0
             self._streak_question_texts = [clean] if sid else []
         self._last_subtopic_id = sid
+        self._last_leadin_label = _leadin_label(clean)
 
         return clean
 
@@ -256,7 +311,35 @@ class Interviewer(BaseAgent, Participant):
             else:
                 self.guardrail_stats["near_duplicate_regen_failed"] += 1
 
-        # Third pass: the depth cap was active for this candidate (it was generated
+        # Third pass: same sentence-opening CONSTRUCTION as the immediately
+        # prior turn (e.g. two "You mentioned X..." in a row), even though the
+        # content differs enough that the near-duplicate token-overlap check
+        # above sees no overlap at all. Detected by regex against a fixed
+        # pattern list, not model judgment, so it can't silently stop firing —
+        # the earlier fix for this (prompts.py wording asking the model to
+        # "vary phrasing") was advisory only and the model kept reusing the
+        # construction anyway. This one regenerates once, and if the retry
+        # still matches, mechanically strips the lead-in clause instead of
+        # asking the model a third time — the fallback does not depend on the
+        # model complying.
+        candidate_label = _leadin_label(clean_text)
+        if candidate_label is not None and candidate_label == self._last_leadin_label:
+            self.guardrail_stats["repeated_leadin"] += 1
+            SessionLogger.log_to_file(
+                "execution_log",
+                f"[GUARDRAIL] Repeated '{candidate_label}' lead-in construction "
+                f"from prior turn. Regenerating.\n  candidate: {clean_text!r}"
+            )
+            regen4 = await self._regenerate_different_leadin(clean_text, candidate_label)
+            regen4_clean, _ = sanitize_interviewer_turn(regen4) if regen4 else ("", None)
+            if regen4_clean and _leadin_label(regen4_clean) != candidate_label:
+                self.guardrail_stats["repeated_leadin_regenerated"] += 1
+                clean_text = regen4_clean
+            else:
+                self.guardrail_stats["repeated_leadin_stripped"] += 1
+                clean_text = _strip_leadin_clause(clean_text)
+
+        # Fourth pass: the depth cap was active for this candidate (it was generated
         # under a [DEPTH CAP ...] directive telling the model to leave this thread).
         # We deliberately do NOT try to lexically verify whether it complied —
         # "still the same underlying incident, different technical facet" is a
@@ -311,6 +394,36 @@ class Interviewer(BaseAgent, Participant):
             SessionLogger.log_to_file(
                 "execution_log",
                 f"[GUARDRAIL] Depth-cap regeneration call failed: {e}"
+            )
+            return ""
+
+    async def _regenerate_different_leadin(self, draft: str, construction: str) -> str:
+        """Ask the model to keep the same probe but open the sentence differently.
+
+        Unlike _regenerate_non_duplicate, the content/target of the question is
+        fine here — only the opening construction repeated. So the instruction
+        is narrower: keep probing the same detail, just don't open with the
+        same sentence shape as last turn.
+        """
+        prompt = (
+            "You are a strictly non-affirming research interviewer.\n"
+            f"You just drafted: {draft!r}\n\n"
+            f"This opens the same way as your immediately preceding question "
+            f"(construction: {construction.replace('_', ' ')!r}). What you're "
+            "asking about is fine — only rewrite the OPENING of the sentence so "
+            "it does not start with that same construction. Do not use any "
+            "'You mentioned/said/talked about' preamble. Options: name the "
+            "detail directly with no preamble, ask 'What/How/Why <detail>...', "
+            "or state the fact and ask a bare follow-up. Output ONE plain "
+            "question — no preamble, no quotes, no tool tags."
+        )
+        try:
+            out = await self.call_engine_async(prompt)
+            return (out or "").strip()
+        except Exception as e:
+            SessionLogger.log_to_file(
+                "execution_log",
+                f"[GUARDRAIL] Lead-in regeneration call failed: {e}"
             )
             return ""
 
