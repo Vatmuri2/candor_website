@@ -88,9 +88,8 @@ _DDL = [
         UNIQUE (user_id, session_id)
     )
     """,
-    # Additive: interview_sessions predates the guardrail/probe-quality admin
-    # surfacing (SPEC.md priority #4). ADD COLUMN IF NOT EXISTS so this runs
-    # safely against a table that already exists from before these columns.
+    # interview_sessions already existed before we added guardrail/probe-quality
+    # surfacing, so add the columns rather than assume a fresh table.
     "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS guardrail_stats JSONB",
     "ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS probe_quality_stats JSONB",
     """
@@ -154,6 +153,19 @@ _DDL = [
         title       TEXT NOT NULL,
         questions   JSONB NOT NULL,
         created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # A respondent's memory bank (see content/memory_bank). Previously local-disk
+    # only under LOGS_DIR, which doesn't survive across serverless invocations on
+    # Vercel — meaning a returning user's memories were silently gone by their
+    # next session. One row per user_id; memories and their embeddings are always
+    # read/written together so they live in one row rather than two tables.
+    """
+    CREATE TABLE IF NOT EXISTS memory_banks (
+        user_id     TEXT PRIMARY KEY,
+        memories    JSONB NOT NULL DEFAULT '[]',
+        embeddings  JSONB NOT NULL DEFAULT '[]',
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
 ]
@@ -524,6 +536,52 @@ def get_custom_interview(token: str) -> Optional[dict]:
     except Exception as e:
         logger.warning(f"get_custom_interview failed for {token}: {e}")
         return None
+
+
+
+# ---- respondent memory bank ----
+
+def get_memory_bank(user_id: str) -> Optional[dict]:
+    """Return {"memories": [...], "embeddings": [...]} for a user_id, or None."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return None
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT memories, embeddings FROM memory_banks WHERE user_id = :u"),
+                {"u": user_id},
+            ).fetchone()
+        if row is None:
+            return None
+        return {"memories": row[0], "embeddings": row[1]}
+    except Exception as e:
+        logger.warning(f"get_memory_bank failed for {user_id}: {e}")
+        return None
+
+
+def save_memory_bank(user_id: str, memories: list, embeddings: list) -> bool:
+    """Store/replace a user's full memory bank. Returns True on success."""
+    engine = _get_engine()
+    if engine is None or not _ensure_schema(engine):
+        return False
+    try:
+        from sqlalchemy import text
+        stmt = text("""
+            INSERT INTO memory_banks (user_id, memories, embeddings, updated_at)
+            VALUES (:u, CAST(:memories AS JSONB), CAST(:embeddings AS JSONB), now())
+            ON CONFLICT (user_id) DO UPDATE SET
+                memories = EXCLUDED.memories, embeddings = EXCLUDED.embeddings,
+                updated_at = now()
+        """)
+        with engine.begin() as conn:
+            conn.execute(stmt, {"u": user_id, "memories": json.dumps(memories),
+                                "embeddings": json.dumps(embeddings)})
+        return True
+    except Exception as e:
+        logger.warning(f"save_memory_bank failed for {user_id}: {e}")
+        return False
 
 
 def list_custom_interviews() -> List[dict]:

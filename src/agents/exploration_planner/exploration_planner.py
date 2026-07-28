@@ -83,10 +83,19 @@ class ExplorationPlanner(BaseAgent, Participant):
         # Configuration
         self.user_id = config["user_id"]
 
-        # Load config from environment variables with fallbacks
-        self.turn_trigger = int(os.getenv("EXPLORATION_PLANNER_TURN_TRIGGER", "3"))
+        # Load config from environment variables with fallbacks.
+        # turn_trigger and rollout_horizon were 3/3: measured end-to-end planning
+        # latency is ~35s (draft rollout -> judge coverage -> strategic questions,
+        # 3 sequential LLM calls on the critical path), but interviews only run
+        # 8-10 turns. Triggering at turn 3 left the cycle still running after the
+        # interview itself had ended in every ablation run (12/12, zero reach).
+        # Triggering at turn 1 instead of 3, and shrinking the rollout horizon
+        # (fewer predicted turns per rollout = smaller draft-call output = less
+        # latency on the critical path), gives it a real chance to finish before
+        # a short interview is over.
+        self.turn_trigger = int(os.getenv("EXPLORATION_PLANNER_TURN_TRIGGER", "1"))
         self.num_rollouts = int(os.getenv("EXPLORATION_PLANNER_NUM_ROLLOUTS", "3"))
-        self.rollout_horizon = int(os.getenv("EXPLORATION_PLANNER_ROLLOUT_HORIZON", "3"))
+        self.rollout_horizon = int(os.getenv("EXPLORATION_PLANNER_ROLLOUT_HORIZON", "2"))
         self.max_strategic_questions = int(os.getenv("EXPLORATION_PLANNER_MAX_QUESTIONS", "5"))
 
         # Utility function weights

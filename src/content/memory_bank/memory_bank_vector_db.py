@@ -1,5 +1,4 @@
 # Python standard library imports
-import os
 import json
 import uuid
 from datetime import datetime
@@ -101,49 +100,30 @@ class VectorMemoryBank(MemoryBankBase):
         
         return results
 
-    def _save_implementation_specific(self, path: str) -> None:
-        """Save embeddings to file.
-        
-        Args:
-            path: Path to save embeddings (either user_id or session path)
-        """
-        embedding_data = {
+    def _get_implementation_data(self) -> dict:
+        """Return embeddings as JSON-serializable data (the base class decides
+        whether that goes to Postgres or a local file)."""
+        return {
             'embeddings': [
                 {'id': memory_id, 'embedding': embedding.tolist()}
                 for memory_id, embedding in self.embeddings.items()
             ]
         }
-        
-        embedding_filepath = os.getenv("LOGS_DIR") + \
-            f"/{path}/memory_bank_embeddings.json"
-        os.makedirs(os.path.dirname(embedding_filepath), exist_ok=True)
-        
-        with open(embedding_filepath, 'w') as f:
-            json.dump(embedding_data, f)
 
-    def _load_implementation_specific(self, user_id: str, base_path: Optional[str] = None) -> None:
-        """Load embeddings from file and reconstruct the FAISS index."""
-        # Determine embedding filepath based on base_path
-        if base_path:
-            embedding_filepath = os.path.join(base_path, "memory_bank_embeddings.json")
-        else:
-            embedding_filepath = os.getenv("LOGS_DIR") + f"/{user_id}/memory_bank_embeddings.json"
-        
-        try:
-            with open(embedding_filepath, 'r') as f:
-                embedding_data = json.load(f)
-                
-            # Create embedding lookup dictionary
-            self.embeddings = {
-                e['id']: np.array(e['embedding'], dtype=np.float32)
-                for e in embedding_data['embeddings']
-            }
-            
-            # Reconstruct FAISS index
-            for memory in self.memories:
-                embedding = self.embeddings.get(memory.id)
-                if embedding is not None:
-                    self.index.add(embedding.reshape(1, -1))
-                    
-        except FileNotFoundError:
-            pass  # No embeddings file exists yet
+    def _load_implementation_data(self, data) -> None:
+        """Restore embeddings from a previously-saved structure and rebuild
+        the FAISS index."""
+        if not data:
+            return
+        embedding_list = data.get('embeddings', []) if isinstance(data, dict) else data
+
+        self.embeddings = {
+            e['id']: np.array(e['embedding'], dtype=np.float32)
+            for e in embedding_list
+        }
+
+        # Reconstruct FAISS index
+        for memory in self.memories:
+            embedding = self.embeddings.get(memory.id)
+            if embedding is not None:
+                self.index.add(embedding.reshape(1, -1))

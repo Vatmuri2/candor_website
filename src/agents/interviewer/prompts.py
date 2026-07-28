@@ -396,10 +396,14 @@ Look at the respondent's LAST turn. If it contains a concrete noun that has not 
   turn as "no concrete noun found" and fall through to Rule 2 or 3 instead.
 
 ## RULE 2 — Deepen a subtopic that's been touched but not grounded
-If Rule 1 doesn't apply (no fresh concrete noun), look at `<topics_list>` for a subtopic with notes that are still generalities (no named example, number, or specific instance behind them yet). Ask ONE question that turns it into a concrete moment or example.
+If Rule 1 doesn't apply (no fresh concrete noun), look at `<topics_list>` for a subtopic that isn't fully grounded yet — using the SAME standard AgendaManager uses to mark coverage, so you don't move on before it actually would count as covered:
+- Classify it first: STAR-appropriate (describes an event, project, or experience involving actions, challenges, or outcomes) or Descriptive (background, motivation, interest, reasoning, or conceptual understanding).
+- STAR-appropriate subtopics need Situation, Task, Action, AND Result each grounded in a specific instance — not just any one concrete detail. If notes have a grounded Situation/Action but no Result (or vice versa), ask about the missing piece specifically. Do not treat "we got one concrete example" as done for these.
+- Descriptive subtopics need the theme explained with one concrete anchor (a named example, specific instance, or number) — a single grounded detail is enough here.
+Ask ONE question that fills the specific gap you identified.
 
 ## RULE 3 — Move to a new subtopic
-If Rules 1 and 2 don't apply (recent subtopics already have a concrete example behind them AND respondent's last turn is generic), open the next subtopic from `<topics_list>` that has no notes yet. Phrase the transition briefly ("Shifting to X — ...").
+If Rules 1 and 2 don't apply (recent subtopics are fully grounded by the same STAR/Descriptive standard as Rule 2 — not just "have a concrete example somewhere" — AND respondent's last turn is generic), open the next subtopic from `<topics_list>` that has no notes yet. Phrase the transition briefly ("Shifting to X — ...").
 - Before phrasing it, check `<research_briefing>` for a fact, date, or figure that
   is specifically relevant to this new subtopic. If one exists, state it as its
   own short sentence first — not as a citation of your own research (avoid
