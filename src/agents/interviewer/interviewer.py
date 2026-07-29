@@ -251,9 +251,9 @@ class Interviewer(BaseAgent, Participant):
         self._last_subtopic_id = sid
         self._last_leadin_label = _leadin_label(clean)
 
-        # Depth-probing signal (SPEC.md priority #3): admin-surfacing only,
-        # never steers the interviewer. Guarded for eval harnesses that don't
-        # wire a probe_quality_monitor (e.g. baseline runs).
+        # Depth-probing signal for the admin panel only — never steers the
+        # interviewer. Guarded since eval harnesses (e.g. baseline runs) don't
+        # wire a probe_quality_monitor.
         probe_monitor = getattr(self.interview_session, "probe_quality_monitor", None)
         if probe_monitor is not None:
             probe_monitor.observe(clean)
@@ -738,7 +738,13 @@ class Interviewer(BaseAgent, Participant):
                 "turn, even if the respondent's last answer contains an unprobed "
                 "concrete noun. You MUST apply RULE 2 (deepen a different, "
                 "ungrounded subtopic) or RULE 3 (move to a new subtopic) and target "
-                f"a subtopic_id other than {self._last_subtopic_id}.]"
+                f"a subtopic_id other than {self._last_subtopic_id}. This override "
+                "does not waive Rule 3's own requirements: briefly acknowledge or "
+                "bridge from what the respondent just said before pivoting — do not "
+                "cold-open on the new subtopic as if their last answer wasn't heard "
+                "— and if `<research_briefing>` has a fact relevant to the new "
+                "subtopic, state it plainly before asking, exactly as Rule 3 already "
+                "instructs.]"
             )
 
         # ExplorationPlanner's utility-scored coverage gaps constrain Rule 3, not
